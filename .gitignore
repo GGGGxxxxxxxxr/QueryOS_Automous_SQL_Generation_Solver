@@ -1,26 +1,41 @@
-DME.md
-!.gitignore
+# Keep the repository focused on source code and lightweight config.
 
-# 允许目录结构存在（否则git不会track文件夹）
-!*/
+# System/editor files
+.DS_Store
+__MACOSX/
 
-# 忽略常见垃圾
+# Python generated files
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+
+# Logs, archives, local databases, and benchmark outputs
 *.log
 *.zip
 *.db
 *.sqlite
 *.json
+*.jsonl
 *.yaml
 *.yml
 
-# 虚拟环境
+# QueryOS config templates should be versioned.
+!cleaned_query_os/queryos_config.yaml
+!cleaned_query_os/queryos_vllm_config.yaml
+
+# Local benchmark data and generated run artifacts.
+dev_20240627/
+dev_20240627-2/dev.sql
+dev_20240627-2/dev_databases/
+dev_20240627-2/traces/
+dev_20240627-2/failure_memory/
+
+# Virtual environments
 venv/
 .env/
 
-# 日志 & 训练输出
+# Training outputs
 wandb/
 tensorboard_log/
 train/
-dev_20240627/

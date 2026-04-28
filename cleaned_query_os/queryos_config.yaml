@@ -1,0 +1,82 @@
+# QueryOS control parameters for high-capacity testing.
+# CLI flags override values in this file.
+
+model: gpt-5.1
+# base_url: https://api.openai.com/v1
+# api_key: sk-...
+temperature: 0.9
+
+models:
+  # Leave blank/null to inherit `model`.
+  planner:
+  schema_discovery:
+  sql_writer:
+  sql_validator:
+
+workflow:
+  # Higher budget for benchmark/debug runs. Planner still controls final finish.
+  max_steps: 20
+  # auto: run SVA after each SQL writer result.
+  # off: disable SVA gate.
+  validation: auto
+  # Legacy behavior. Only applies when validation is off.
+  auto_finish_on_sql: false
+
+planner:
+  # compact: old shorter context.
+  # dispatch: task + shared state + SQL memory + validation memory + dispatch history.
+  context: dispatch
+  max_tokens: 4096
+
+schema_discovery:
+  max_tokens: 8192
+  max_turns: 16
+  max_tool_calls_per_turn: 8
+
+  # Actual READ_TABLE_JSON payload sent to SDA.
+  # 0 means no column cap.
+  read_table_summary_max_cols: 0
+
+  # Terminal trace preview for READ_TABLE_JSON columns.
+  # This does not change what SDA receives.
+  # 0 means show all columns included in the READ_TABLE_JSON summary.
+  trace_column_preview_limit: 0
+
+sql_writer:
+  max_tokens: 8192
+  max_turns: 16
+  # >1 enables an internal SQL writer group. The manager still sees one SWA call.
+  parallel_workers: 2
+  consensus:
+    # false: agreement/result consensus focuses on returned values; aliases may differ.
+    # true: result consensus also requires identical output column names.
+    require_same_columns: false
+  chatgroup:
+    enabled: true
+    # Each round lets every writer AGREE with one current SQL or REVISE its own SQL.
+    # Any REVISE is immediately executed against SQLite and invalidates old agreements.
+    max_rounds: 2
+
+sql_validator:
+  max_tokens: 4096
+
+trace:
+  live: true
+  style: pretty
+  color: auto
+  # 0 means no truncation.
+  max_chars: 0
+
+  # User-facing terminal previews.
+  # SQL query result table rows shown in live trace and shared state panels.
+  # 0 means show all rows returned by the executor.
+  sql_preview_rows: 10
+  # Rows shown in GOLDEN SQL CHECK comparison previews.
+  # 0 means show all rows returned by the executor.
+  gold_preview_rows: 10
+  # Max displayed width per table cell in terminal result tables.
+  # 0 means no cell-width cap.
+  result_cell_max_width: 64
+
+  # off | summary | diff | full
+  state_view: full

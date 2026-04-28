@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cleaned-query-os"
+version = "0.1.0"
+description = "A cleaned, self-contained QueryOS SQL generation agent for SQLite."
+requires-python = ">=3.9"
+dependencies = ["openai>=1.0.0", "PyYAML>=6.0"]
+
+[project.scripts]
+query-os = "query_os.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["query_os*"]

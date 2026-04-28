@@ -1,0 +1,64 @@
+# QueryOS config template for a local OpenAI-compatible vLLM server.
+#
+# Example server shape:
+#   base_url: http://localhost:8000/v1
+#   model: the served model name exposed by vLLM
+#
+# QueryOS uses OpenAI tool/function calling heavily. Your vLLM deployment must
+# support tool calls for the chosen model/template, otherwise Planner/SDA/SWA/SVA
+# cannot reliably operate.
+
+base_url: http://localhost:8000/v1
+api_key: EMPTY
+
+# Must match your vLLM --served-model-name, or the model id exposed by /v1/models.
+model: queryos-local
+temperature: 0.2
+
+models:
+  # Leave blank/null to inherit `model`, or route roles to different served names.
+  planner:
+  schema_discovery:
+  sql_writer:
+  sql_validator:
+  # Used by dev_20240627-2/build_failure_memory.py for mismatch summaries.
+  reason_summarizer:
+
+workflow:
+  max_steps: 20
+  validation: auto
+  auto_finish_on_sql: false
+
+planner:
+  context: dispatch
+  max_tokens: 4096
+
+schema_discovery:
+  max_tokens: 8192
+  max_turns: 16
+  max_tool_calls_per_turn: 8
+  read_table_summary_max_cols: 0
+  trace_column_preview_limit: 0
+
+sql_writer:
+  max_tokens: 8192
+  max_turns: 16
+  parallel_workers: 2
+  consensus:
+    require_same_columns: false
+  chatgroup:
+    enabled: true
+    max_rounds: 2
+
+sql_validator:
+  max_tokens: 4096
+
+trace:
+  live: true
+  style: pretty
+  color: auto
+  max_chars: 0
+  sql_preview_rows: 10
+  gold_preview_rows: 10
+  result_cell_max_width: 64
+  state_view: full
