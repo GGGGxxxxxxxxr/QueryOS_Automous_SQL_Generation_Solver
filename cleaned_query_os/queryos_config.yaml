@@ -1,10 +1,12 @@
 # QueryOS control parameters for high-capacity testing.
 # CLI flags override values in this file.
 
+provider: openai
 model: gpt-5.1
 # base_url: https://api.openai.com/v1
 # api_key: sk-...
 temperature: 0.9
+llm_timeout_seconds: 120
 
 models:
   # Leave blank/null to inherit `model`.

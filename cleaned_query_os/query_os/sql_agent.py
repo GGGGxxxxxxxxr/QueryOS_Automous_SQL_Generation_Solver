@@ -6,7 +6,7 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from .llm import create_chat_completion, create_openai_client, is_fatal_llm_error, safe_llm_error
+from .llm import create_chat_completion, create_llm_backend, is_fatal_llm_error, safe_llm_error
 from .metadata import SchemaMetadataStore
 from .prompts import build_planner_system_prompt
 from .schema_discovery_agent import SchemaDiscoveryAgent
@@ -83,8 +83,9 @@ class Planner:
         max_tokens: int = 1024,
         context_mode: str = "dispatch",
         debug: bool = False,
+        llm_client: Optional[Any] = None,
     ) -> None:
-        self.client = create_openai_client(api_key=api_key, base_url=base_url)
+        self.client = llm_client or create_llm_backend(provider="openai", api_key=api_key, base_url=base_url)
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -95,6 +96,7 @@ class Planner:
         try:
             response = create_chat_completion(
                 self.client,
+                role="planner",
                 model=self.model,
                 messages=[
                     {"role": "system", "content": build_planner_system_prompt()},
@@ -387,9 +389,15 @@ class QueryOS:
         planner_context: str = "dispatch",
         validation_mode: str = "auto",
         auto_finish_on_sql: bool = False,
+        provider: str = "openai",
+        llm_router_config: Optional[Dict[str, Any]] = None,
+        llm_timeout: Optional[float] = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url
+        self.provider = provider
+        self.llm_router_config = llm_router_config or {}
+        self.llm_timeout = float(llm_timeout) if llm_timeout else None
         self.model = model
         self.planner_model = planner_model or model
         self.schema_model = schema_model or model
@@ -473,6 +481,15 @@ class QueryOS:
         )
         sql_preview_rows = trace_sql_preview_rows if trace_sql_preview_rows is not None else self.trace_sql_preview_rows
         gold_preview_rows = trace_gold_preview_rows if trace_gold_preview_rows is not None else self.trace_gold_preview_rows
+        llm_backend = create_llm_backend(
+            provider=self.provider,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.model,
+            router_config=self.llm_router_config,
+            timeout=self.llm_timeout,
+            tracer=tracer,
+        )
         system = AgenticSystem(
             planner=Planner(
                 model=self.planner_model,
@@ -482,6 +499,7 @@ class QueryOS:
                 max_tokens=self.planner_max_tokens,
                 context_mode=planner_context or self.planner_context,
                 debug=self.debug,
+                llm_client=llm_backend,
             ),
             schema_discovery_agent=SchemaDiscoveryAgent(
                 model=self.schema_model,
@@ -495,6 +513,7 @@ class QueryOS:
                 trace_column_preview_limit=self.schema_trace_column_preview_limit,
                 debug=self.debug,
                 tracer=tracer,
+                llm_client=llm_backend,
             ),
             sql_writer_agent=SQLWriterAgent(
                 model=self.sql_model,
@@ -511,6 +530,7 @@ class QueryOS:
                 consensus_require_same_columns=self.sql_consensus_require_same_columns,
                 debug=self.debug,
                 tracer=tracer,
+                llm_client=llm_backend,
             ),
             sql_validator_agent=SQLValidatorAgent(
                 model=self.validator_model,
@@ -520,6 +540,7 @@ class QueryOS:
                 max_tokens=self.validator_max_tokens,
                 debug=self.debug,
                 tracer=tracer,
+                llm_client=llm_backend,
             ),
             metadata=metadata,
             tracer=tracer,

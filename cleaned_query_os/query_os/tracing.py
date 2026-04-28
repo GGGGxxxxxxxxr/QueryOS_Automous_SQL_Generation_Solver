@@ -77,6 +77,21 @@ class EventTracer:
         target.write_text(json.dumps(doc, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
     def format_event(self, event: Dict[str, Any]) -> str:
+        if event.get("event_type") == "llm_call":
+            payload = event.get("payload") or {}
+            parts = [
+                f"provider={payload.get('provider')}",
+                f"role={payload.get('role')}",
+                f"endpoint={payload.get('endpoint')}",
+                f"model={payload.get('model')}",
+                f"latency_ms={payload.get('latency_ms')}",
+            ]
+            if payload.get("retry"):
+                parts.append(f"retry={payload.get('retry')}")
+            if payload.get("error"):
+                parts.append(f"error={self._shorten(str(payload.get('error')), 160)}")
+            return "[llm] " + ", ".join(str(part) for part in parts if part)
+
         if event.get("event_type") == "state_delta":
             if self.state_view == "off":
                 return ""
@@ -246,6 +261,24 @@ class EventTracer:
             if tools:
                 return f"    planned tools: {', '.join(str(x) for x in tools)}"
             return "    planned tools: none"
+
+        if event_type == "llm_call":
+            provider = payload.get("provider")
+            endpoint = payload.get("endpoint")
+            role = payload.get("role") or agent
+            latency = payload.get("latency_ms")
+            retry = payload.get("retry")
+            mark = "[LLM]" if status == "ok" else "[LLM ERR]"
+            color = "magenta" if status == "ok" else "red"
+            line = (
+                f"    {self._color(mark, color, bold=True)} "
+                f"{role} -> {endpoint} ({provider}, {latency} ms)"
+            )
+            if retry:
+                line += f" retry={retry}"
+            if payload.get("error"):
+                line += f"\n      {self._color('error', 'red')}: {self._shorten(str(payload.get('error')), 180)}"
+            return line
 
         if event_type == "tool_result":
             if tool == "SQLITE_EXEC":

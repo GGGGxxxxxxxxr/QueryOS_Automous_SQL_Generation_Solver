@@ -8,12 +8,73 @@
 # support tool calls for the chosen model/template, otherwise Planner/SDA/SWA/SVA
 # cannot reliably operate.
 
+provider: vllm
+
+# Single-endpoint fallback. Used when llm_router.endpoints is empty.
 base_url: http://localhost:8000/v1
 api_key: EMPTY
 
 # Must match your vLLM --served-model-name, or the model id exposed by /v1/models.
 model: queryos-local
 temperature: 0.2
+llm_timeout_seconds: 120
+
+llm_router:
+  enabled: true
+  # least_inflight is the best default when multiple copies have similar capacity.
+  # Other options: round_robin, random.
+  strategy: least_inflight
+  request_timeout_seconds: 120
+  max_retries: 2
+  cooldown_seconds: 30
+
+  # Empty list means: route to the top-level base_url above.
+  # To use multiple copies, replace [] with endpoints like:
+  #
+  # endpoints:
+  #   - name: node1-copy1
+  #     base_url: http://node1:8001/v1
+  #     api_key: EMPTY
+  #     model: queryos-local
+  #     weight: 1
+  #     max_inflight: 8
+  #   - name: node1-copy2
+  #     base_url: http://node1:8002/v1
+  #     api_key: EMPTY
+  #     model: queryos-local
+  #     weight: 1
+  #     max_inflight: 8
+  #   - name: node2-copy1
+  #     base_url: http://node2:8001/v1
+  #     api_key: EMPTY
+  #     model: queryos-local
+  #     weight: 1
+  #     max_inflight: 8
+  #   - name: node2-copy2
+  #     base_url: http://node2:8002/v1
+  #     api_key: EMPTY
+  #     model: queryos-local
+  #     weight: 1
+  #     max_inflight: 8
+  endpoints: []
+
+  # Optional role-specific pools. If omitted, every role can use every endpoint.
+  role_pools:
+    planner:
+      strategy: least_inflight
+      endpoints: [node1-copy1, node1-copy2, node2-copy1, node2-copy2]
+    schema_discovery:
+      strategy: least_inflight
+      endpoints: [node1-copy1, node1-copy2, node2-copy1, node2-copy2]
+    sql_writer:
+      strategy: least_inflight
+      endpoints: [node1-copy1, node1-copy2, node2-copy1, node2-copy2]
+    sql_validator:
+      strategy: least_inflight
+      endpoints: [node1-copy1, node1-copy2, node2-copy1, node2-copy2]
+    reason_summarizer:
+      strategy: least_inflight
+      endpoints: [node1-copy1, node1-copy2, node2-copy1, node2-copy2]
 
 models:
   # Leave blank/null to inherit `model`, or route roles to different served names.

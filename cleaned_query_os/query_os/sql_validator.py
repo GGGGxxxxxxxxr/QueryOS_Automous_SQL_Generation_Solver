@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from .llm import create_chat_completion, create_openai_client, is_fatal_llm_error, safe_llm_error
+from .llm import create_chat_completion, create_llm_backend, is_fatal_llm_error, safe_llm_error
 from .prompts import build_sql_validator_system_prompt
 from .state import AgentName, AgentReturn, SharedState, ValidationAttempt, WorkflowStatus
 from .tracing import EventTracer, NULL_TRACER
@@ -84,8 +84,9 @@ class SQLValidatorAgent:
         max_tokens: int = 2048,
         debug: bool = False,
         tracer: Optional[EventTracer] = None,
+        llm_client: Optional[Any] = None,
     ) -> None:
-        self.client = create_openai_client(api_key=api_key, base_url=base_url)
+        self.client = llm_client or create_llm_backend(provider="openai", api_key=api_key, base_url=base_url)
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -354,6 +355,7 @@ class SQLValidatorAgent:
     def _call_llm(self, messages: List[Dict[str, Any]]) -> Any:
         response = create_chat_completion(
             self.client,
+            role="sql_validator",
             model=self.model,
             messages=messages,
             tools=SQL_VALIDATOR_TOOLS,

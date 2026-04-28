@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from .llm import create_chat_completion, create_openai_client, is_fatal_llm_error, safe_llm_error
+from .llm import create_chat_completion, create_llm_backend, is_fatal_llm_error, safe_llm_error
 from .prompts import build_sql_writer_chat_system_prompt, build_sql_writer_system_prompt
 from .sqlite_executor import SQLiteExecutor
 from .state import AgentName, AgentReturn, SQLAttempt, SharedState
@@ -124,8 +124,9 @@ class SQLWriterAgent:
         consensus_require_same_columns: bool = False,
         debug: bool = False,
         tracer: Optional[EventTracer] = None,
+        llm_client: Optional[Any] = None,
     ) -> None:
-        self.client = create_openai_client(api_key=api_key, base_url=base_url)
+        self.client = llm_client or create_llm_backend(provider="openai", api_key=api_key, base_url=base_url)
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -889,6 +890,7 @@ class SQLWriterAgent:
     def _call_llm(self, messages: List[Dict[str, Any]]) -> Any:
         response = create_chat_completion(
             self.client,
+            role="sql_writer",
             model=self.model,
             messages=messages,
             tools=SQL_WRITER_TOOLS,
@@ -900,6 +902,7 @@ class SQLWriterAgent:
     def _call_chat_llm(self, messages: List[Dict[str, Any]]) -> Any:
         response = create_chat_completion(
             self.client,
+            role="sql_writer",
             model=self.model,
             messages=messages,
             tools=SQL_WRITER_CHAT_TOOLS,

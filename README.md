@@ -96,6 +96,7 @@ cleaned_query_os/queryos_vllm_config.yaml
 Set:
 
 ```yaml
+provider: vllm
 base_url: http://localhost:8000/v1
 api_key: EMPTY
 model: your-served-model-name
@@ -112,6 +113,51 @@ query-os \
 ```
 
 QueryOS depends heavily on OpenAI-style tool/function calling. The local vLLM deployment must support tool calls for the selected model and chat template.
+
+### Multiple vLLM Copies
+
+If the same model is hosted on several vLLM servers, QueryOS can route calls across them from the client side. OpenAI and vLLM are separate backends: use `provider: openai` for the hosted OpenAI API, and `provider: vllm` for local OpenAI-compatible vLLM routing.
+
+Example:
+
+```yaml
+provider: vllm
+model: queryos-local
+api_key: EMPTY
+
+llm_router:
+  enabled: true
+  strategy: least_inflight
+  request_timeout_seconds: 120
+  max_retries: 2
+  cooldown_seconds: 30
+
+  endpoints:
+    - name: node1-copy1
+      base_url: http://node1:8001/v1
+      model: queryos-local
+      max_inflight: 8
+    - name: node1-copy2
+      base_url: http://node1:8002/v1
+      model: queryos-local
+      max_inflight: 8
+    - name: node2-copy1
+      base_url: http://node2:8001/v1
+      model: queryos-local
+      max_inflight: 8
+    - name: node2-copy2
+      base_url: http://node2:8002/v1
+      model: queryos-local
+      max_inflight: 8
+```
+
+Routing strategies:
+
+- `least_inflight`: send the next call to the least busy endpoint.
+- `round_robin`: rotate through endpoints.
+- `random`: weighted random routing using each endpoint's `weight`.
+
+The router is most useful when QueryOS is already concurrent, for example with `sql_writer.parallel_workers: 2` or with `build_failure_memory.py --workers 4`.
 
 ## Batch Failure Memory
 

@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from .llm import create_chat_completion, create_openai_client, is_fatal_llm_error, safe_llm_error
+from .llm import create_chat_completion, create_llm_backend, is_fatal_llm_error, safe_llm_error
 from .metadata import SchemaMetadataStore, parse_foreign_key
 from .prompts import build_schema_discovery_system_prompt
 from .state import AgentName, AgentReturn, SharedState, TableEvidence
@@ -211,8 +211,9 @@ class SchemaDiscoveryAgent:
         trace_column_preview_limit: int = 8,
         debug: bool = False,
         tracer: Optional[EventTracer] = None,
+        llm_client: Optional[Any] = None,
     ) -> None:
-        self.client = create_openai_client(api_key=api_key, base_url=base_url)
+        self.client = llm_client or create_llm_backend(provider="openai", api_key=api_key, base_url=base_url)
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -435,6 +436,7 @@ class SchemaDiscoveryAgent:
     def _call_llm(self, messages: List[Dict[str, Any]]) -> Any:
         response = create_chat_completion(
             self.client,
+            role="schema_discovery",
             model=self.model,
             messages=messages,
             tools=SCHEMA_TOOLS,

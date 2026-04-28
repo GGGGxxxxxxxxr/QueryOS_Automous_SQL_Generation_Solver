@@ -16,7 +16,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--db", required=True, dest="db_path", help="Path to a SQLite database.")
     parser.add_argument("--metadata", dest="schema_metadata_path", help="Optional database_description directory.")
     parser.add_argument("--api-key", dest="api_key", help="OpenAI API key. Defaults to OPENAI_API_KEY.")
-    parser.add_argument("--base-url", dest="base_url", help="Optional OpenAI-compatible base URL.")
+    parser.add_argument("--base-url", dest="base_url", help="Provider base URL. For vLLM this is the OpenAI-compatible /v1 URL.")
+    parser.add_argument(
+        "--provider",
+        choices=["openai", "vllm"],
+        help="LLM provider backend. Use vllm for local OpenAI-compatible vLLM routing.",
+    )
     parser.add_argument("--model", help="Model for planner/SDA/SWA/SVA.")
     parser.add_argument("--external-knowledge", default="", help="Optional extra task context.")
     parser.add_argument("--db-id", default="", help="Optional database id/name.")
@@ -91,11 +96,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     live_trace = bool(cfg_get(config, "trace.live", True))
     if args.no_live_trace:
         live_trace = False
+    router_config = cfg_get(config, "llm_router", {})
+    if not isinstance(router_config, dict):
+        router_config = {}
+    provider_default = "vllm" if router_config.get("enabled") else "openai"
 
     agent = QueryOS(
+        provider=pick(args.provider, config, "provider", provider_default),
         api_key=pick(args.api_key, config, "api_key", None),
         model=pick(args.model, config, "model", "gpt-4.1-mini"),
         base_url=pick(args.base_url, config, "base_url", None),
+        llm_router_config=router_config,
+        llm_timeout=cfg_get(config, "llm_timeout_seconds", None),
         planner_model=cfg_get(config, "models.planner", None),
         schema_model=cfg_get(config, "models.schema_discovery", None),
         sql_model=cfg_get(config, "models.sql_writer", None),

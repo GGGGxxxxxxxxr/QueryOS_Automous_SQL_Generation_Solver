@@ -144,6 +144,48 @@ The planner receives dispatch-oriented context by default with `--planner-contex
 SQL validation runs automatically after each SQL writer result with `--validation auto`. The validator writes natural-language feedback into Validation Memory; the planner still decides the next action and must issue the final finish. Use `--validation off` to disable this gate. `--auto-finish-on-sql` only applies when validation is off.
 When `sql_writer.parallel_workers` is greater than 1, SWA internally forks multiple SQL writers. Each writer runs on a forked state; only the writer-group consensus SQL is committed to shared global state. If candidates disagree, the writers enter a bounded chatgroup where each writer either agrees with one current SQL or revises its own SQL. Revised SQL is executed immediately before the next chat round.
 
+### Provider Backends
+
+QueryOS keeps hosted OpenAI and local vLLM calls separate:
+
+- `provider: openai` uses a single OpenAI backend.
+- `provider: vllm` uses the vLLM backend. It can route across one or more OpenAI-compatible vLLM endpoints.
+
+For one local vLLM server:
+
+```yaml
+provider: vllm
+base_url: http://localhost:8000/v1
+api_key: EMPTY
+model: queryos-local
+```
+
+For multiple copies of the same model:
+
+```yaml
+provider: vllm
+model: queryos-local
+api_key: EMPTY
+
+llm_router:
+  enabled: true
+  strategy: least_inflight
+  request_timeout_seconds: 120
+  max_retries: 2
+  cooldown_seconds: 30
+  endpoints:
+    - name: node1-copy1
+      base_url: http://node1:8001/v1
+      model: queryos-local
+      max_inflight: 8
+    - name: node1-copy2
+      base_url: http://node1:8002/v1
+      model: queryos-local
+      max_inflight: 8
+```
+
+Available router strategies are `least_inflight`, `round_robin`, and `random`.
+
 ### YAML Config
 
 Agent control parameters can be kept in a YAML file:

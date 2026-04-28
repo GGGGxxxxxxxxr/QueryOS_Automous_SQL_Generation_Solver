@@ -17,7 +17,7 @@ if str(CLEANED_QUERYOS_ROOT) not in sys.path:
     sys.path.insert(0, str(CLEANED_QUERYOS_ROOT))
 
 from query_os.config import cfg_get, load_yaml_config, pick  # noqa: E402
-from query_os.llm import create_chat_completion, create_openai_client, safe_llm_error  # noqa: E402
+from query_os.llm import create_chat_completion, create_llm_backend, safe_llm_error  # noqa: E402
 from query_os.sql_agent import QueryOS, result_to_dict  # noqa: E402
 
 
@@ -34,6 +34,7 @@ def main() -> int:
     parser.add_argument("--output-jsonl", default=str(SCRIPT_DIR / "failure_memory" / "error_bank.jsonl"))
     parser.add_argument("--api-key", dest="api_key")
     parser.add_argument("--base-url", dest="base_url")
+    parser.add_argument("--provider", choices=["openai", "vllm"], help="LLM provider backend.")
     parser.add_argument("--model", help="Override QueryOS model from YAML.")
     parser.add_argument("--reason-model", help="Model used to summarize mismatch reasons. Defaults to QueryOS model.")
     parser.add_argument("--max-steps", type=int)
@@ -153,11 +154,18 @@ def build_queryos_agent(args: argparse.Namespace, config: Dict[str, Any]) -> Que
         trace_max_chars = int(trace_max_chars)
     if trace_max_chars == 0:
         trace_max_chars = None
+    router_config = cfg_get(config, "llm_router", {})
+    if not isinstance(router_config, dict):
+        router_config = {}
+    provider_default = "vllm" if router_config.get("enabled") else "openai"
 
     return QueryOS(
+        provider=pick(args.provider, config, "provider", provider_default),
         api_key=pick(args.api_key, config, "api_key", None),
         model=pick(args.model, config, "model", "gpt-4.1-mini"),
         base_url=pick(args.base_url, config, "base_url", None),
+        llm_router_config=router_config,
+        llm_timeout=cfg_get(config, "llm_timeout_seconds", None),
         planner_model=cfg_get(config, "models.planner", None),
         schema_model=cfg_get(config, "models.schema_discovery", None),
         sql_model=cfg_get(config, "models.sql_writer", None),
@@ -248,9 +256,17 @@ def process_sample(
             if args.no_llm_reason:
                 error_reason = deterministic_error_reason(result_doc)
             else:
-                reason_client = create_openai_client(
+                router_config = cfg_get(config, "llm_router", {})
+                if not isinstance(router_config, dict):
+                    router_config = {}
+                provider_default = "vllm" if router_config.get("enabled") else "openai"
+                reason_client = create_llm_backend(
+                    provider=pick(args.provider, config, "provider", provider_default),
                     api_key=pick(args.api_key, config, "api_key", None),
                     base_url=pick(args.base_url, config, "base_url", None),
+                    model=pick(args.model, config, "model", "gpt-4.1-mini"),
+                    router_config=router_config,
+                    timeout=cfg_get(config, "llm_timeout_seconds", None),
                 )
                 error_reason = summarize_error_reason(reason_client, reason_model, sample, result_doc)
 
@@ -397,6 +413,7 @@ def summarize_error_reason(
     }
     response = create_chat_completion(
         client,
+        role="reason_summarizer",
         model=model,
         messages=[
             {
