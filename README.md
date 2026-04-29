@@ -41,7 +41,7 @@ Question + SQLite DB + table metadata
         v
 +-------------------------------------------------------------------------+
 | Shared State                                                            |
-| question, metadata, discovered schema, SQL attempts, validation memory,  |
+| question, metadata, discovered schema, SQL attempts, validation memory, |
 | planner history, warnings, workflow status                              |
 +-------------------------------------------------------------------------+
         ^
@@ -56,9 +56,9 @@ Question + SQLite DB + table metadata
 |          v                    v                 v                       |
 |  +---------------+    +---------------+   finish guard                  |
 |  | SDA Group     |    | SWA Group     |   checks latest state           |
-|  | fork workers  |    | fork writers  |                 |              |
-|  | union merge   |    | consensus     |                 v              |
-|  +---------------+    +---------------+          Result or blocked       |
+|  | fork workers  |    | fork writers  |                 |               |
+|  | union merge   |    | consensus     |                 v               |
+|  +---------------+    +---------------+          Result or blocked      |
 |          |                    |                                         |
 |          |                    v                                         |
 |          |           auto validation gate                               |
