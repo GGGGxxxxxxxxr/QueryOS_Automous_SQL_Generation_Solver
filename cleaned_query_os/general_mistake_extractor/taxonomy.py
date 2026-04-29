@@ -148,6 +148,7 @@ def make_proposed_type(taxonomy: Dict[str, Any], atomic: Dict[str, Any]) -> Dict
         "error": compact_error_reason_from_atomic(atomic),
         "typical_error_sql_shape": compact_typical_error_sql_shape_from_atomic(atomic),
         "ideal_sql_shape": compact_ideal_sql_shape_from_atomic(atomic),
+        "pattern_tuples": [],
         "support_count": 0,
         "created_sample_idx": current_sample_idx(taxonomy),
         "last_vote_sample_idx": current_sample_idx(taxonomy),
@@ -160,6 +161,7 @@ def add_support(target: Dict[str, Any], atomic: Dict[str, Any], *, sample_idx: i
     target["error"] = target.get("error") or compact_error_reason_from_atomic(atomic)
     target["typical_error_sql_shape"] = target.get("typical_error_sql_shape") or compact_typical_error_sql_shape_from_atomic(atomic)
     target["ideal_sql_shape"] = target.get("ideal_sql_shape") or compact_ideal_sql_shape_from_atomic(atomic)
+    add_pattern_tuple(target, make_pattern_tuple_from_atomic(atomic))
     if target.get("status") == "proposed":
         target.setdefault("created_sample_idx", sample_idx)
         target["last_vote_sample_idx"] = sample_idx
@@ -191,6 +193,103 @@ def merge_type_support(target: Dict[str, Any], source: Dict[str, Any]) -> None:
     target["support_count"] = int(target.get("support_count", 0) or 0) + int(source.get("support_count", 0) or 0)
     for field in ("error", "typical_error_sql_shape", "ideal_sql_shape"):
         target[field] = target.get(field) or source.get(field) or ""
+    for pattern in normalize_pattern_tuples(source.get("pattern_tuples")):
+        add_pattern_tuple(target, pattern)
+
+
+def make_pattern_tuple_from_atomic(atomic: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "error": compact_error_reason_from_atomic(atomic),
+        "typical_error_sql_shape": compact_typical_error_sql_shape_from_atomic(atomic),
+        "ideal_sql_shape": compact_ideal_sql_shape_from_atomic(atomic),
+        "support_count": 1,
+    }
+
+
+def make_pattern_tuple_from_type(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "error": compact_error_reason(item),
+        "typical_error_sql_shape": compact_typical_error_sql_shape(item),
+        "ideal_sql_shape": compact_ideal_sql_shape(item),
+        "support_count": max(1, safe_int(item.get("support_count"), 1)),
+    }
+
+
+def add_pattern_tuple(target: Dict[str, Any], pattern: Dict[str, Any]) -> None:
+    normalized = normalize_pattern_tuple(pattern)
+    if not normalized:
+        return
+    patterns = target.setdefault("pattern_tuples", [])
+    if not isinstance(patterns, list):
+        patterns = []
+        target["pattern_tuples"] = patterns
+    key = pattern_tuple_key(normalized)
+    for existing in patterns:
+        if not isinstance(existing, dict):
+            continue
+        if pattern_tuple_key(existing) == key:
+            existing["support_count"] = int(existing.get("support_count", 0) or 0) + int(
+                normalized.get("support_count", 1) or 1
+            )
+            return
+    patterns.append(normalized)
+
+
+def normalize_pattern_tuples(raw: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        pattern = normalize_pattern_tuple(item)
+        if not pattern:
+            continue
+        merge_pattern_into_list(normalized, pattern)
+    return sorted(normalized, key=lambda item: (-int(item.get("support_count", 0) or 0), pattern_tuple_key(item)))
+
+
+def normalize_loaded_pattern_tuples(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw_patterns = item.get("pattern_tuples") or item.get("patterns")
+    patterns = normalize_pattern_tuples(raw_patterns)
+    if patterns:
+        return patterns
+    return [make_pattern_tuple_from_type(item)]
+
+
+def normalize_pattern_tuple(raw: Dict[str, Any]) -> Dict[str, Any]:
+    pattern = {
+        "error": compact_text(raw.get("error")),
+        "typical_error_sql_shape": compact_pattern_or_text(raw.get("typical_error_sql_shape")),
+        "ideal_sql_shape": compact_pattern_or_text(raw.get("ideal_sql_shape")),
+        "support_count": max(1, safe_int(raw.get("support_count"), 1)),
+    }
+    if not (pattern["error"] or pattern["typical_error_sql_shape"] or pattern["ideal_sql_shape"]):
+        return {}
+    if not pattern["error"]:
+        pattern["error"] = "Reusable SQL reasoning mistake."
+    if not pattern["typical_error_sql_shape"]:
+        pattern["typical_error_sql_shape"] = "The SQL shape does not match the requested answer semantics."
+    return pattern
+
+
+def merge_pattern_into_list(patterns: List[Dict[str, Any]], pattern: Dict[str, Any]) -> None:
+    key = pattern_tuple_key(pattern)
+    for existing in patterns:
+        if pattern_tuple_key(existing) == key:
+            existing["support_count"] = int(existing.get("support_count", 0) or 0) + int(
+                pattern.get("support_count", 1) or 1
+            )
+            return
+    patterns.append(dict(pattern))
+
+
+def pattern_tuple_key(pattern: Dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        compact_text(pattern.get("error")),
+        compact_pattern_or_text(pattern.get("typical_error_sql_shape")),
+        compact_pattern_or_text(pattern.get("ideal_sql_shape")),
+    )
 
 
 def advance_taxonomy_sample(taxonomy: Dict[str, Any]) -> int:
@@ -284,6 +383,7 @@ def compact_proposed_capacity_candidates(taxonomy: Dict[str, Any], limit: int) -
                 "error": compact_error_reason(item),
                 "typical_error_sql_shape": compact_typical_error_sql_shape(item),
                 "ideal_sql_shape": compact_ideal_sql_shape(item),
+                "tuple_count": len(normalize_pattern_tuples(item.get("pattern_tuples"))),
                 "support_count": int(item.get("support_count", 0) or 0),
                 "created_sample_idx": int(item.get("created_sample_idx", 0) or 0),
                 "last_vote_sample_idx": int(item.get("last_vote_sample_idx", 0) or 0),
@@ -292,7 +392,7 @@ def compact_proposed_capacity_candidates(taxonomy: Dict[str, Any], limit: int) -
     return result
 
 
-def build_general_mistake_set(taxonomy: Dict[str, Any]) -> Dict[str, Any]:
+def build_general_mistake_set(taxonomy: Dict[str, Any], *, pattern_limit: int = 10) -> Dict[str, Any]:
     mistakes = []
     for item in taxonomy.get("active_types", []):
         if not isinstance(item, dict):
@@ -302,10 +402,8 @@ def build_general_mistake_set(taxonomy: Dict[str, Any]) -> Dict[str, Any]:
                 "id": item.get("id"),
                 "family": item.get("family"),
                 "name": item.get("name"),
-                "error": compact_error_reason(item),
-                "typical_error_sql_shape": compact_typical_error_sql_shape(item),
-                "ideal_sql_shape": compact_ideal_sql_shape(item),
                 "support_count": item.get("support_count", 0),
+                "patterns": compact_pattern_tuples_for_output(item, limit=pattern_limit),
             }
         )
     mistakes.sort(key=lambda item: (str(item.get("family")), -int(item.get("support_count") or 0), str(item.get("id"))))
@@ -316,6 +414,17 @@ def build_general_mistake_set(taxonomy: Dict[str, Any]) -> Dict[str, Any]:
             "mistakes": mistakes,
         }
     )
+
+
+def compact_pattern_tuples_for_output(item: Dict[str, Any], *, limit: int) -> List[Dict[str, Any]]:
+    raw_patterns = item.get("deduped_pattern_tuples") or item.get("pattern_tuples")
+    patterns = normalize_pattern_tuples(raw_patterns)
+    if not patterns:
+        patterns = [make_pattern_tuple_from_type(item)]
+    patterns = sorted(patterns, key=lambda pattern: (-int(pattern.get("support_count", 0) or 0), pattern_tuple_key(pattern)))
+    if limit > 0:
+        patterns = patterns[:limit]
+    return sanitize_output_obj(patterns)
 
 
 def compact_error_reason(item: Dict[str, Any]) -> str:
@@ -428,6 +537,7 @@ def compact_types(items: Any, limit: int) -> List[Dict[str, Any]]:
                 "error": compact_error_reason(item),
                 "typical_error_sql_shape": compact_typical_error_sql_shape(item),
                 "ideal_sql_shape": compact_ideal_sql_shape(item),
+                "patterns": compact_pattern_tuples_for_output(item, limit=3),
                 "support_count": item.get("support_count", 0),
             }
         )
@@ -452,9 +562,13 @@ def minimal_type_record(item: Dict[str, Any], *, proposed: bool) -> Dict[str, An
         "error": compact_error_reason(item),
         "typical_error_sql_shape": compact_typical_error_sql_shape(item),
         "ideal_sql_shape": compact_ideal_sql_shape(item),
+        "pattern_tuples": normalize_loaded_pattern_tuples(item),
         "support_count": int(item.get("support_count", 0) or 0),
         "status": "proposed" if proposed else "active",
     }
+    deduped = normalize_pattern_tuples(item.get("deduped_pattern_tuples"))
+    if deduped:
+        record["deduped_pattern_tuples"] = deduped
     if proposed:
         record["proposal_id"] = item.get("proposal_id") or ""
         record["created_sample_idx"] = int(item.get("created_sample_idx") or 0)

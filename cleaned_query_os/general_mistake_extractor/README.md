@@ -23,14 +23,17 @@ stage 2: propose a new type only for unmatched mistakes
 active/proposed type pool
    |
    v
-compact general mistake set
+final tuple dedupe inside each active type
+   |
+   v
+compact general mistake set with representative patterns
 ```
 
 The extractor avoids database-level lessons. It should not produce rules like
 "in this database, charter fields are in table X." Instead, it abstracts them
 into general patterns such as "wrong source for semantic concept."
 
-The extractor also avoids any benchmark-specific language in its outputs. The
+The extractor also avoids any evaluator-specific language in its outputs. The
 final artifacts should be usable in real deployments where no comparison SQL is
 available.
 
@@ -51,7 +54,9 @@ python cleaned_query_os/general_mistake_extractor/build_general_mistakes.py \
   --provider vllm \
   --limit 20 \
   --proposal-stale-after 50 \
-  --max-proposed-types 100
+  --max-proposed-types 100 \
+  --tuple-dedupe-threshold 8 \
+  --max-tuples-per-type 5
 ```
 
 OpenAI example:
@@ -97,6 +102,14 @@ Mistake type records are intentionally small:
   "error": "The SQL computes at the wrong entity or grouping level.",
   "typical_error_sql_shape": "SELECT <column>, AVG(<column>) FROM <table> GROUP BY <column>",
   "ideal_sql_shape": "SELECT <column> FROM <table> ORDER BY <column> DESC LIMIT <number>",
+  "pattern_tuples": [
+    {
+      "error": "The SQL computes at the wrong entity or grouping level.",
+      "typical_error_sql_shape": "SELECT <group_key>, AVG(<metric>) FROM <table> GROUP BY <group_key>",
+      "ideal_sql_shape": "SELECT <entity> FROM <table> ORDER BY <metric> DESC LIMIT <number>",
+      "support_count": 1
+    }
+  ],
   "support_count": 1,
   "created_sample_idx": 12,
   "last_vote_sample_idx": 12,
@@ -126,25 +139,49 @@ it is used to remove near-duplicates, overly narrow proposals, vague proposals,
 or low-support entries that are unlikely to become stable general mistakes. Use
 `--max-proposed-types 0` to disable this cleanup.
 
+Each type keeps independent `pattern_tuples`. A tuple is the smallest reusable
+runtime lesson:
+
+- `error`
+- `typical_error_sql_shape`
+- `ideal_sql_shape`
+
+This matters because one broad type can have several real sub-shapes. For
+example, a percentage calculation type might contain separate tuples for wrong
+denominator, missing multiplication by 100, and integer division. Those should
+not be collapsed during online collection.
+
+After all selected records are processed, the extractor can run a final
+intra-type dedupe pass. When an active type has at least
+`--tuple-dedupe-threshold` raw tuples, the LLM merges near-duplicates into at
+most `--max-tuples-per-type` representative tuples. This keeps raw learning
+fine-grained while keeping `general_mistake_set.json` readable. Use
+`--tuple-dedupe-threshold 0` to disable the final tuple pass.
+
 `ignored_traces.jsonl` stores records that were skipped because they appeared
 unsafe for taxonomy learning.
 
 `general_mistake_set.json` is intentionally compact. It keeps only active types
-and the three runtime-facing fields:
+and their representative tuple patterns:
 
 ```json
 {
   "id": "sql_logic.aggregation_scope_mismatch",
   "family": "sql_logic",
   "name": "Aggregation Scope Mismatch",
-  "error": "The SQL computes at the wrong entity or grouping level.",
-  "typical_error_sql_shape": "SELECT <group_key>, AVG(<metric>) FROM <table> GROUP BY <group_key>",
-  "ideal_sql_shape": "SELECT <column> FROM <table> ORDER BY <metric> DESC LIMIT <number>",
-  "support_count": 3
+  "support_count": 3,
+  "patterns": [
+    {
+      "error": "The SQL computes at the wrong grouping level.",
+      "typical_error_sql_shape": "SELECT <group_key>, AVG(<metric>) FROM <table> GROUP BY <group_key>",
+      "ideal_sql_shape": "SELECT <entity> FROM <table> ORDER BY <metric> DESC LIMIT <number>",
+      "support_count": 2
+    }
+  ]
 }
 ```
 
-Each mistake type is summarized as:
+Each pattern tuple is summarized as:
 
 - `error`: what reasoning failure happens
 - `typical_error_sql_shape`: the common risky SQL shape, preferably as an abstract skeleton

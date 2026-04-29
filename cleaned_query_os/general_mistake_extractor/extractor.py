@@ -9,8 +9,11 @@ from mistake_prompts import (
     build_proposal_user_prompt,
     build_routing_system_prompt,
     build_routing_user_prompt,
+    build_tuple_dedupe_system_prompt,
+    build_tuple_dedupe_user_prompt,
 )
 from query_os.llm import create_chat_completion
+from taxonomy import normalize_pattern_tuples
 from text_utils import parse_json_object, sanitize_output_obj
 
 
@@ -215,3 +218,37 @@ def normalize_drop_proposals(result: Dict[str, Any], *, target_drop_count: int) 
         if len(normalized) >= max(1, target_drop_count):
             break
     return normalized
+
+
+def dedupe_pattern_tuples(
+    *,
+    client: Any,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    type_item: Dict[str, Any],
+    review_limit: int,
+    max_patterns: int,
+) -> List[Dict[str, Any]]:
+    result = call_extractor_llm(
+        client=client,
+        role="general_mistake_tuple_deduper",
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        system_prompt=build_tuple_dedupe_system_prompt(),
+        user_prompt=build_tuple_dedupe_user_prompt(
+            type_item=type_item,
+            review_limit=review_limit,
+            max_patterns=max_patterns,
+        ),
+    )
+    return normalize_deduped_patterns(result, max_patterns=max_patterns)
+
+
+def normalize_deduped_patterns(result: Dict[str, Any], *, max_patterns: int) -> List[Dict[str, Any]]:
+    raw_items = result.get("patterns")
+    patterns = normalize_pattern_tuples(raw_items)
+    if max_patterns > 0:
+        patterns = patterns[:max_patterns]
+    return patterns

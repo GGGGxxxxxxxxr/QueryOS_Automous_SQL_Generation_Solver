@@ -12,7 +12,7 @@ CLEANED_QUERYOS_ROOT = SCRIPT_DIR.parent
 if str(CLEANED_QUERYOS_ROOT) not in sys.path:
     sys.path.insert(0, str(CLEANED_QUERYOS_ROOT))
 
-from extractor import extract_and_route_record, select_unnecessary_proposals  # noqa: E402
+from extractor import dedupe_pattern_tuples, extract_and_route_record, select_unnecessary_proposals  # noqa: E402
 from io_utils import append_jsonl, filter_records, load_jsonl, load_processed_question_ids, write_json  # noqa: E402
 from query_os.config import cfg_get, load_yaml_config, pick  # noqa: E402
 from query_os.llm import create_llm_backend, safe_llm_error  # noqa: E402
@@ -23,6 +23,7 @@ from taxonomy import (  # noqa: E402
     drop_proposals_by_ids,
     load_taxonomy,
     normalize_atomic_items,
+    normalize_pattern_tuples,
     prune_stale_proposals,
 )
 from text_utils import clean_text, safe_int, sanitize_output_obj  # noqa: E402
@@ -83,14 +84,16 @@ def main() -> int:
             counters=counters,
         )
 
+    counters["tuple_dedupe_runs"] = dedupe_active_type_patterns(args, client, model, temperature, taxonomy)
     write_json(paths["taxonomy"], sanitize_output_obj(taxonomy))
-    write_json(paths["mistake_set"], build_general_mistake_set(taxonomy))
+    write_json(paths["mistake_set"], build_general_mistake_set(taxonomy, pattern_limit=args.max_tuples_per_type))
     print(
         "[general-mistakes] done | "
         f"processed={counters['processed']} skipped={counters['skipped']} "
         f"ignored={counters['ignored']} atomic={counters['atomic']} "
         f"promoted={counters['promoted']} discarded_proposals={counters['discarded_proposals']} "
-        f"capacity_prune_runs={counters['capacity_prune_runs']} errors={counters['errors']}"
+        f"capacity_prune_runs={counters['capacity_prune_runs']} "
+        f"tuple_dedupe_runs={counters['tuple_dedupe_runs']} errors={counters['errors']}"
     )
     return 0
 
@@ -133,6 +136,27 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=200,
         help="Maximum number of proposed type candidates shown to the capacity cleanup LLM.",
+    )
+    parser.add_argument(
+        "--tuple-dedupe-threshold",
+        type=int,
+        default=8,
+        help=(
+            "Run final intra-type tuple dedupe when an active type has at least this many raw pattern tuples. "
+            "Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--max-tuples-per-type",
+        type=int,
+        default=5,
+        help="Maximum representative pattern tuples kept per active type in general_mistake_set.json.",
+    )
+    parser.add_argument(
+        "--tuple-dedupe-review-limit",
+        type=int,
+        default=80,
+        help="Maximum raw pattern tuples shown to the final tuple-dedupe LLM for one active type.",
     )
     parser.add_argument("--active-preview-limit", type=int, default=40)
     parser.add_argument("--proposed-preview-limit", type=int, default=80)
@@ -238,7 +262,7 @@ def process_one_record(
                 },
             )
             write_json(paths["taxonomy"], sanitize_output_obj(taxonomy))
-            write_json(paths["mistake_set"], build_general_mistake_set(taxonomy))
+            write_json(paths["mistake_set"], build_general_mistake_set(taxonomy, pattern_limit=args.max_tuples_per_type))
             counters["discarded_proposals"] += len(discarded)
             append_run_log(
                 paths["run_log"],
@@ -257,7 +281,7 @@ def process_one_record(
         if not atomic_items:
             discarded = discard_proposals(args, client, model, temperature, taxonomy, counters)
             write_json(paths["taxonomy"], sanitize_output_obj(taxonomy))
-            write_json(paths["mistake_set"], build_general_mistake_set(taxonomy))
+            write_json(paths["mistake_set"], build_general_mistake_set(taxonomy, pattern_limit=args.max_tuples_per_type))
             counters["discarded_proposals"] += len(discarded)
             append_run_log(
                 paths["run_log"],
@@ -285,7 +309,7 @@ def process_one_record(
         discarded = discard_proposals(args, client, model, temperature, taxonomy, counters)
         counters["discarded_proposals"] += len(discarded)
         write_json(paths["taxonomy"], sanitize_output_obj(taxonomy))
-        write_json(paths["mistake_set"], build_general_mistake_set(taxonomy))
+        write_json(paths["mistake_set"], build_general_mistake_set(taxonomy, pattern_limit=args.max_tuples_per_type))
         append_run_log(
             paths["run_log"],
             question_id,
@@ -316,6 +340,48 @@ def discard_proposals(
     discarded = prune_stale_proposals(taxonomy, stale_after=max(0, int(args.proposal_stale_after or 0)))
     discarded.extend(discard_excess_proposals(args, client, model, temperature, taxonomy, counters))
     return discarded
+
+
+def dedupe_active_type_patterns(
+    args: argparse.Namespace,
+    client: Any,
+    model: str,
+    temperature: float,
+    taxonomy: Dict[str, Any],
+) -> int:
+    threshold = max(0, int(args.tuple_dedupe_threshold or 0))
+    if threshold <= 0:
+        return 0
+    max_patterns = max(1, int(args.max_tuples_per_type or 1))
+    review_limit = max(max_patterns, int(args.tuple_dedupe_review_limit or 0))
+    runs = 0
+    for item in taxonomy.get("active_types", []):
+        if not isinstance(item, dict):
+            continue
+        raw_patterns = normalize_pattern_tuples(item.get("pattern_tuples"))
+        if len(raw_patterns) < threshold:
+            continue
+        try:
+            deduped = dedupe_pattern_tuples(
+                client=client,
+                model=model,
+                temperature=temperature,
+                max_tokens=args.max_tokens,
+                type_item=item,
+                review_limit=review_limit,
+                max_patterns=max_patterns,
+            )
+        except Exception as exc:
+            print(f"[general-mistakes] tuple dedupe skipped for {item.get('id')}: {safe_llm_error(exc)}")
+            continue
+        if deduped:
+            item["deduped_pattern_tuples"] = deduped
+            runs += 1
+            print(
+                "[general-mistakes] tuple dedupe "
+                f"{item.get('id')} | raw={len(raw_patterns)} representative={len(deduped)}"
+            )
+    return runs
 
 
 def discard_excess_proposals(

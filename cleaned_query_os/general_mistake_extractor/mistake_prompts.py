@@ -11,7 +11,7 @@ from constants import (
     EVAL_SQL_KEY,
     SEED_FAMILIES,
 )
-from taxonomy import compact_proposed_capacity_candidates, compact_types
+from taxonomy import compact_proposed_capacity_candidates, compact_types, normalize_pattern_tuples
 from text_utils import sanitize_input_text, truncate
 
 
@@ -118,6 +118,39 @@ Return one JSON object with this exact shape:
     {
       "proposal_id": "proposal id to remove",
       "reason": "short reason"
+    }
+  ]
+}
+"""
+
+
+def build_tuple_dedupe_system_prompt() -> str:
+    return COMMON_SYSTEM_PROMPT + """
+
+This is the final intra-type pattern deduplication stage.
+
+You are given one already-established general mistake type and many supporting pattern tuples under it.
+Each tuple has:
+- error
+- typical_error_sql_shape
+- ideal_sql_shape
+
+Your job:
+- Merge near-duplicate tuples within this type.
+- Keep distinct sub-patterns when they represent materially different SQL failure shapes or repairs.
+- Preserve the type boundary; do not rename the type or create new types.
+- Return a compact list of representative tuple patterns.
+- The tuple must remain general. Do not include dataset details.
+- Prefer abstract SQL skeletons for both SQL shape fields.
+
+Return one JSON object with this exact shape:
+{
+  "patterns": [
+    {
+      "error": "short general error reason",
+      "typical_error_sql_shape": "abstract wrong SQL shape",
+      "ideal_sql_shape": "abstract ideal SQL shape",
+      "support_count": 1
     }
   ]
 }
@@ -240,6 +273,33 @@ def build_capacity_prune_user_prompt(
         f"{json.dumps(taxonomy_view, ensure_ascii=False, indent=2)}\n\n"
         "Choose only proposed IDs from proposed_drop_candidates. "
         "Prefer dropping near-duplicates, vague entries, overly narrow entries, and low-support stale entries. "
+        "Output JSON only."
+    )
+
+
+def build_tuple_dedupe_user_prompt(
+    *,
+    type_item: Dict[str, Any],
+    review_limit: int,
+    max_patterns: int,
+) -> str:
+    raw_patterns = normalize_pattern_tuples(type_item.get("pattern_tuples"))
+    if review_limit > 0:
+        raw_patterns = raw_patterns[:review_limit]
+    type_view = {
+        "id": type_item.get("id"),
+        "family": type_item.get("family"),
+        "name": type_item.get("name"),
+        "support_count": type_item.get("support_count", 0),
+        "max_output_patterns": max_patterns,
+        "pattern_tuples": raw_patterns,
+    }
+    return (
+        "Deduplicate pattern tuples for this one mistake type:\n"
+        f"{json.dumps(type_view, ensure_ascii=False, indent=2)}\n\n"
+        "Return at most max_output_patterns representative tuple patterns. "
+        "Merge only truly redundant tuples; keep different wrong SQL shapes separate. "
+        "Use abstract placeholders such as <table>, <column>, <condition>, <metric>, <group_key>, <date_col>. "
         "Output JSON only."
     )
 
