@@ -39,58 +39,54 @@ QueryOS is built around a few core ideas:
 Question + SQLite DB + table metadata
         |
         v
-+------------------+
-| Manager/Planner  |  owns the global step loop and shared state
-+------------------+
-        |
-        |  CALL_SCHEMA_DISCOVERY
-        v
-+------------------------- Schema Discovery Group -------------------------+
-| SDA-1 on forked state     SDA-2 on forked state     ... SDA-N            |
-| search/read/introduce     search/read/introduce         search/read       |
 +-------------------------------------------------------------------------+
+| Shared State                                                            |
+| question, metadata, discovered schema, SQL attempts, validation memory,  |
+| planner history, warnings, workflow status                              |
++-------------------------------------------------------------------------+
+        ^
         |
-        |  union merge -> discovered schema + numeric confidence
-        v
-+------------------+
-| Shared State     |  schema memory, SQL memory, validation memory, plan log
-+------------------+
+        |  every global step reads the current shared state
         |
-        |  CALL_SQL_WRITER
-        v
-+--------------------------- SQL Writer Group -----------------------------+
-| Writer-1 on forked state  Writer-2 on forked state  ... Writer-N         |
-| explore + execute SQL     explore + execute SQL         explore + execute |
++----------------------------- Manager / Planner --------------------------+
+| Chooses exactly one next action each step:                              |
 |                                                                         |
-| if results agree: commit consensus SQL                                  |
-| if results disagree: run bounded chatgroup                              |
+|  CALL_SCHEMA_DISCOVERY  CALL_SQL_WRITER  PLANNER_FINISH                 |
+|          |                    |                 |                       |
+|          v                    v                 v                       |
+|  +---------------+    +---------------+   finish guard                  |
+|  | SDA Group     |    | SWA Group     |   checks latest state           |
+|  | fork workers  |    | fork writers  |                 |              |
+|  | union merge   |    | consensus     |                 v              |
+|  +---------------+    +---------------+          Result or blocked       |
+|          |                    |                                         |
+|          |                    v                                         |
+|          |           auto validation gate                               |
+|          |           SVA writes feedback                                |
+|          |                    |                                         |
+|          +--------------------+-----------------------------------------+
+|                               |                                         |
+|                               v                                         |
+|                      update shared state                                |
+|                               |                                         |
+|                               +---- loop back to planner ---------------+
 +-------------------------------------------------------------------------+
-        |
-        |  commit one executable group candidate
-        v
-+------------------+
-| Shared State     |  latest SQL attempt + result preview
-+------------------+
-        |
-        |  VALIDATION_GATE
-        v
-+------------------------- SQL Validator Agent ----------------------------+
-| checks question/evidence/schema/result and writes natural-language       |
-| feedback into validation memory                                          |
-+-------------------------------------------------------------------------+
-        |
-        v
-+------------------+
-| Manager/Planner  |  decides retry, call another worker, or FINISH
-+------------------+
-        |
-        v
-Result + trace JSON + optional golden SQL comparison
 ```
 
-The important detail is that parallelism is internal to a worker group. The
-manager still sees a clean global state transition: dispatch a logical worker,
-merge or commit the group output, validate, then decide the next global action.
+This is not a fixed schema -> writer -> validator -> finish pipeline. The
+planner is the scheduler. It may call schema discovery multiple times, call SQL
+writing after partial schema, retry SQL after validation feedback, ask for more
+schema after a failed SQL, or attempt to finish. The manager guard can block a
+finish decision when the latest shared state is not safe enough.
+
+The validation gate is automatic after a successful SQL writer call when
+`workflow.validation: auto` is enabled. SVA writes feedback into shared state; it
+does not choose the next route. The planner reads that feedback on the next
+global step and decides what to do.
+
+Parallelism is internal to a worker group. The manager dispatches one logical
+worker call, while the group may fork several workers, synchronize, and then
+merge or commit one clean update back into shared state.
 
 ## Parallel Workers
 
