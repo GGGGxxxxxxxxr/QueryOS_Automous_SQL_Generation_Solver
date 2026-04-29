@@ -137,8 +137,8 @@ def split_routing_decisions(
         decision = str(routing.get("decision") or "").strip().upper()
         item = {
             "error": raw.get("error", ""),
-            "typical_shape": raw.get("typical_shape", ""),
-            "correct_pattern": raw.get("correct_pattern", ""),
+            "typical_error_sql_shape": raw.get("typical_error_sql_shape", ""),
+            "ideal_sql_shape": raw.get("ideal_sql_shape", ""),
             "routing": dict(routing),
         }
         if decision == "ATTACH_ACTIVE" and routing.get("active_type_id") in active_ids:

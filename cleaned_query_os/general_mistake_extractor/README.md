@@ -95,8 +95,8 @@ Mistake type records are intentionally small:
   "id": "sql_logic.aggregation_scope_mismatch",
   "name": "Aggregation Scope Mismatch",
   "error": "The SQL computes at the wrong entity or grouping level.",
-  "typical_shape": "SELECT <column>, AVG(<column>) FROM <table> GROUP BY <column>",
-  "correct_pattern": "SELECT <column> FROM <table> ORDER BY <column> DESC LIMIT <number>",
+  "typical_error_sql_shape": "SELECT <column>, AVG(<column>) FROM <table> GROUP BY <column>",
+  "ideal_sql_shape": "SELECT <column> FROM <table> ORDER BY <column> DESC LIMIT <number>",
   "support_count": 1,
   "created_sample_idx": 12,
   "last_vote_sample_idx": 12,
@@ -138,8 +138,8 @@ and the three runtime-facing fields:
   "family": "sql_logic",
   "name": "Aggregation Scope Mismatch",
   "error": "The SQL computes at the wrong entity or grouping level.",
-  "typical_shape": "SELECT <group_key>, AVG(<metric>) FROM <table> GROUP BY <group_key>",
-  "correct_pattern": "SELECT <column> FROM <table> ORDER BY <metric> DESC LIMIT <number>",
+  "typical_error_sql_shape": "SELECT <group_key>, AVG(<metric>) FROM <table> GROUP BY <group_key>",
+  "ideal_sql_shape": "SELECT <column> FROM <table> ORDER BY <metric> DESC LIMIT <number>",
   "support_count": 3
 }
 ```
@@ -147,8 +147,8 @@ and the three runtime-facing fields:
 Each mistake type is summarized as:
 
 - `error`: what reasoning failure happens
-- `typical_shape`: the common risky SQL shape, preferably as an abstract skeleton
-- `correct_pattern`: the ideal SQL shape or repair pattern, also abstract when possible
+- `typical_error_sql_shape`: the common risky SQL shape, preferably as an abstract skeleton
+- `ideal_sql_shape`: the ideal SQL shape or repair pattern, also abstract when possible
 
 Detailed per-sample evidence stays in `atomic_mistakes.jsonl`; `taxonomy.json`
 and `general_mistake_set.json` stay compact.

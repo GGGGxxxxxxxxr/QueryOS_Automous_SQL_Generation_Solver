@@ -38,8 +38,8 @@ Return one JSON object with this exact shape:
   "routing_decisions": [
     {
       "error": "one short reusable error reason",
-      "typical_shape": "abstract risky SQL skeleton or short behavior shape",
-      "correct_pattern": "abstract corrected SQL skeleton or short ideal rule",
+      "typical_error_sql_shape": "abstract risky SQL skeleton or short behavior shape",
+      "ideal_sql_shape": "abstract corrected SQL skeleton or short ideal rule",
       "routing": {
         "decision": "ATTACH_ACTIVE | VOTE_PROPOSED | NEED_NEW_TYPE",
         "active_type_id": "required only for ATTACH_ACTIVE",
@@ -69,8 +69,8 @@ Return one JSON object with this exact shape:
   "atomic_mistakes": [
     {
       "error": "one short reusable error reason",
-      "typical_shape": "abstract risky SQL skeleton or short behavior shape",
-      "correct_pattern": "abstract corrected SQL skeleton or short ideal rule",
+      "typical_error_sql_shape": "abstract risky SQL skeleton or short behavior shape",
+      "ideal_sql_shape": "abstract corrected SQL skeleton or short ideal rule",
       "proposed_family": "one top-level family id",
       "proposed_type": "snake_case general type name",
       "routing": {
@@ -105,7 +105,7 @@ Drop proposed types when they are:
 - near-duplicates of an active type
 - near-duplicates of another proposed type
 - too sample-specific to be reusable
-- vague, low-quality, or missing a useful error/typical_shape/correct_pattern
+- vague, low-quality, or missing a useful error/typical_error_sql_shape/ideal_sql_shape
 - low support and unlikely to become a stable general mistake
 
 Prefer keeping proposed types with higher support, clearer SQL skeletons, and distinct correction patterns.
@@ -139,19 +139,23 @@ Hard constraints:
 - If the offline comparison behavior is clearly inconsistent with the natural-language question/evidence, mark the trace as skipped and do not extract atomic mistakes.
 - Skip only when the comparison behavior is clearly wrong or self-contradictory, not merely because the failed SQL looks plausible.
 - Keep reusable rule fields compact and abstract.
-- Do not put concrete database names, table names, column names, place names, organization names, or literal values in error, typical_shape, or correct_pattern.
+- Do not put concrete database names, table names, column names, place names, organization names, or literal values in error, typical_error_sql_shape, or ideal_sql_shape.
 - Do not include parenthetical examples in reusable rule fields.
 - Prefer one precise mistake type over broad buckets that mix unrelated causes.
 - Prefer an existing near-match over creating a slightly more precise duplicate.
 - Focus on three reusable facts: error reason, typical error SQL pattern, and ideal SQL pattern.
 - Keep all fields minimal. Do not produce long criteria lists.
 - When possible, express typical error shape as an abstract SQL skeleton.
+- Generalize the mistake mechanism, not the dataset detail.
+- Prefer "missing required WHERE predicate before aggregation" over "forgot to filter a specific school type".
+- Prefer "wrong grouping level" over "grouped by a specific district column".
+- Prefer "extra output column" over naming the concrete extra column.
 - Use placeholders such as <table>, <column>, <condition>, <group_key>, <metric>, <date_col>, <value>.
-- Good typical_shape examples:
+- Good typical_error_sql_shape examples:
   - SELECT <group_key>, COUNT(*) FROM <table> WHERE <condition> GROUP BY <group_key>
   - WHERE DATE(<date_col>) = DATE(<literal>) when direct comparison is enough
   - SELECT <id>, <col1> UNION SELECT <id>, <col2> when paired columns should stay together
-- Good correct_pattern examples:
+- Good ideal_sql_shape examples:
   - SELECT <group_key>, COUNT(*) FROM <table> WHERE <required_subset_filter> GROUP BY <group_key>
   - WHERE <date_col> = <date_literal>
   - SELECT <id>, <col1>, <col2> FROM <table>

@@ -33,17 +33,13 @@ def normalize_atomic_items(result: Dict[str, Any], record: Dict[str, Any]) -> Li
             or raw.get("type_definition")
             or "Reusable SQL reasoning mistake."
         )
-        typical_shape = (
-            raw.get("typical_shape")
-            or raw.get("typical_error_sql_pattern")
-            or first_abstract_sql_shape(raw.get("risky_sql_shapes", []))
+        typical_error_sql_shape = (
+            raw.get("typical_error_sql_shape")
             or first_compact_line(raw.get("risky_behavior", []))
             or first_compact_line(raw.get("diagnostic_signals", []))
         )
-        correct_pattern = (
-            raw.get("correct_pattern")
-            or raw.get("ideal_sql_pattern")
-            or first_abstract_sql_shape(raw.get("ideal_sql_shapes", []))
+        ideal_sql_shape = (
+            raw.get("ideal_sql_shape")
             or raw.get("repair_principle")
         )
         item = {
@@ -52,8 +48,8 @@ def normalize_atomic_items(result: Dict[str, Any], record: Dict[str, Any]) -> Li
             "db_id": str(record.get("db_id") or ""),
             "difficulty": str(record.get("difficulty") or ""),
             "error": compact_text(error),
-            "typical_shape": compact_pattern_or_text(typical_shape),
-            "correct_pattern": compact_pattern_or_text(correct_pattern),
+            "typical_error_sql_shape": compact_pattern_or_text(typical_error_sql_shape),
+            "ideal_sql_shape": compact_pattern_or_text(ideal_sql_shape),
             "proposed_family": family,
             "proposed_type": mistake_type,
             "routing": normalize_routing(raw.get("routing")),
@@ -150,8 +146,8 @@ def make_proposed_type(taxonomy: Dict[str, Any], atomic: Dict[str, Any]) -> Dict
         "id": f"{family}.{mistake_type}",
         "name": humanize_type_name(mistake_type),
         "error": compact_error_reason_from_atomic(atomic),
-        "typical_shape": compact_typical_error_shape_from_atomic(atomic),
-        "correct_pattern": compact_correct_pattern_from_atomic(atomic),
+        "typical_error_sql_shape": compact_typical_error_sql_shape_from_atomic(atomic),
+        "ideal_sql_shape": compact_ideal_sql_shape_from_atomic(atomic),
         "support_count": 0,
         "created_sample_idx": current_sample_idx(taxonomy),
         "last_vote_sample_idx": current_sample_idx(taxonomy),
@@ -162,8 +158,8 @@ def make_proposed_type(taxonomy: Dict[str, Any], atomic: Dict[str, Any]) -> Dict
 def add_support(target: Dict[str, Any], atomic: Dict[str, Any], *, sample_idx: int) -> None:
     target["support_count"] = int(target.get("support_count", 0) or 0) + 1
     target["error"] = target.get("error") or compact_error_reason_from_atomic(atomic)
-    target["typical_shape"] = target.get("typical_shape") or compact_typical_error_shape_from_atomic(atomic)
-    target["correct_pattern"] = target.get("correct_pattern") or compact_correct_pattern_from_atomic(atomic)
+    target["typical_error_sql_shape"] = target.get("typical_error_sql_shape") or compact_typical_error_sql_shape_from_atomic(atomic)
+    target["ideal_sql_shape"] = target.get("ideal_sql_shape") or compact_ideal_sql_shape_from_atomic(atomic)
     if target.get("status") == "proposed":
         target.setdefault("created_sample_idx", sample_idx)
         target["last_vote_sample_idx"] = sample_idx
@@ -193,7 +189,7 @@ def maybe_promote_type(taxonomy: Dict[str, Any], proposed: Dict[str, Any], thres
 
 def merge_type_support(target: Dict[str, Any], source: Dict[str, Any]) -> None:
     target["support_count"] = int(target.get("support_count", 0) or 0) + int(source.get("support_count", 0) or 0)
-    for field in ("error", "typical_shape", "correct_pattern"):
+    for field in ("error", "typical_error_sql_shape", "ideal_sql_shape"):
         target[field] = target.get(field) or source.get(field) or ""
 
 
@@ -286,8 +282,8 @@ def compact_proposed_capacity_candidates(taxonomy: Dict[str, Any], limit: int) -
                 "family": item.get("family"),
                 "type": item.get("type"),
                 "error": compact_error_reason(item),
-                "typical_shape": compact_typical_error_sql_pattern(item),
-                "correct_pattern": compact_ideal_sql_pattern(item),
+                "typical_error_sql_shape": compact_typical_error_sql_shape(item),
+                "ideal_sql_shape": compact_ideal_sql_shape(item),
                 "support_count": int(item.get("support_count", 0) or 0),
                 "created_sample_idx": int(item.get("created_sample_idx", 0) or 0),
                 "last_vote_sample_idx": int(item.get("last_vote_sample_idx", 0) or 0),
@@ -307,8 +303,8 @@ def build_general_mistake_set(taxonomy: Dict[str, Any]) -> Dict[str, Any]:
                 "family": item.get("family"),
                 "name": item.get("name"),
                 "error": compact_error_reason(item),
-                "typical_shape": compact_typical_error_sql_pattern(item),
-                "correct_pattern": compact_ideal_sql_pattern(item),
+                "typical_error_sql_shape": compact_typical_error_sql_shape(item),
+                "ideal_sql_shape": compact_ideal_sql_shape(item),
                 "support_count": item.get("support_count", 0),
             }
         )
@@ -349,14 +345,9 @@ def compact_error_reason_from_atomic(atomic: Dict[str, Any]) -> str:
     )
 
 
-def compact_typical_error_sql_pattern(item: Dict[str, Any]) -> str:
-    if item.get("typical_shape"):
-        return compact_pattern_or_text(item.get("typical_shape"))
-    if item.get("typical_error_sql_pattern"):
-        return compact_sql_pattern_text(item.get("typical_error_sql_pattern"))
-    sql_shape = first_abstract_sql_shape(item.get("risky_sql_shapes", []))
-    if sql_shape:
-        return sql_shape
+def compact_typical_error_sql_shape(item: Dict[str, Any]) -> str:
+    if item.get("typical_error_sql_shape"):
+        return compact_pattern_or_text(item.get("typical_error_sql_shape"))
     candidates = [
         first_compact_line(item.get("risky_behavior", [])),
         first_compact_line(item.get("diagnostic_signals", [])),
@@ -369,20 +360,15 @@ def compact_typical_error_sql_pattern(item: Dict[str, Any]) -> str:
     return "The SQL shape does not match the requested answer semantics."
 
 
-def compact_ideal_sql_pattern(item: Dict[str, Any]) -> str:
-    if item.get("correct_pattern"):
-        return compact_pattern_or_text(item.get("correct_pattern"))
-    if item.get("ideal_sql_pattern"):
-        return compact_sql_pattern_text(item.get("ideal_sql_pattern"))
-    return first_abstract_sql_shape(item.get("ideal_sql_shapes", [])) or first_abstract_sql_shape(
-        item.get("repair_principles", [])
-    )
+def compact_ideal_sql_shape(item: Dict[str, Any]) -> str:
+    if item.get("ideal_sql_shape"):
+        return compact_pattern_or_text(item.get("ideal_sql_shape"))
+    return first_compact_line(item.get("repair_principles", []))
 
 
-def compact_typical_error_shape_from_atomic(atomic: Dict[str, Any]) -> str:
+def compact_typical_error_sql_shape_from_atomic(atomic: Dict[str, Any]) -> str:
     return (
-        compact_pattern_or_text(atomic.get("typical_shape"))
-        or first_abstract_sql_shape(atomic.get("risky_sql_shapes", []))
+        compact_pattern_or_text(atomic.get("typical_error_sql_shape"))
         or compact_text(
             first_compact_line(atomic.get("risky_behavior", []))
             or first_compact_line(atomic.get("diagnostic_signals", []))
@@ -391,10 +377,9 @@ def compact_typical_error_shape_from_atomic(atomic: Dict[str, Any]) -> str:
     )
 
 
-def compact_correct_pattern_from_atomic(atomic: Dict[str, Any]) -> str:
+def compact_ideal_sql_shape_from_atomic(atomic: Dict[str, Any]) -> str:
     return (
-        compact_pattern_or_text(atomic.get("correct_pattern"))
-        or first_abstract_sql_shape(atomic.get("ideal_sql_shapes", []))
+        compact_pattern_or_text(atomic.get("ideal_sql_shape"))
         or compact_pattern_or_text(atomic.get("repair_principle"))
     )
 
@@ -441,8 +426,8 @@ def compact_types(items: Any, limit: int) -> List[Dict[str, Any]]:
                 "family": item.get("family"),
                 "type": item.get("type"),
                 "error": compact_error_reason(item),
-                "typical_shape": compact_typical_error_sql_pattern(item),
-                "correct_pattern": compact_ideal_sql_pattern(item),
+                "typical_error_sql_shape": compact_typical_error_sql_shape(item),
+                "ideal_sql_shape": compact_ideal_sql_shape(item),
                 "support_count": item.get("support_count", 0),
             }
         )
@@ -465,8 +450,8 @@ def minimal_type_record(item: Dict[str, Any], *, proposed: bool) -> Dict[str, An
         "id": f"{family}.{mistake_type}",
         "name": item.get("name") or humanize_type_name(mistake_type),
         "error": compact_error_reason(item),
-        "typical_shape": compact_typical_error_sql_pattern(item),
-        "correct_pattern": compact_ideal_sql_pattern(item),
+        "typical_error_sql_shape": compact_typical_error_sql_shape(item),
+        "ideal_sql_shape": compact_ideal_sql_shape(item),
         "support_count": int(item.get("support_count", 0) or 0),
         "status": "proposed" if proposed else "active",
     }
@@ -485,127 +470,10 @@ def normalize_family(value: Any) -> str:
     return family
 
 
-def first_abstract_sql_shape(values: Any) -> str:
-    if not isinstance(values, list):
-        values = [values] if values else []
-    for value in values:
-        text = clean_text(value)
-        if not text:
-            continue
-        text = strip_specific_sql_details(text)
-        if not looks_like_sql_shape(text):
-            continue
-        return shorten_sentence(text, max_words=32)
-    return ""
-
-
-def compact_sql_pattern_text(value: Any) -> str:
-    text = clean_text(value)
-    if not text:
-        return ""
-    if looks_like_sql_shape(text):
-        return shorten_sentence(strip_specific_sql_details(text), max_words=32)
-    return compact_text(text)
-
-
 def compact_pattern_or_text(value: Any) -> str:
     if isinstance(value, list):
-        sql_shape = first_abstract_sql_shape(value)
-        if sql_shape:
-            return sql_shape
         return first_compact_line(value)
-    text = clean_text(value)
-    if not text:
-        return ""
-    if looks_like_sql_shape(text):
-        return compact_sql_pattern_text(text)
-    return compact_text(text)
-
-
-def looks_like_sql_shape(text: str) -> bool:
-    upper = text.upper()
-    return any(keyword in upper for keyword in ("SELECT", "WHERE", "JOIN", "GROUP BY", "ORDER BY", "HAVING", "LIMIT"))
-
-
-def strip_specific_sql_details(text: str) -> str:
-    text = re.sub(r"`[^`]+`", "<column>", text)
-    text = re.sub(r"'[^']*'", "<value>", text)
-    text = re.sub(r'"[^"]*"', "<column>", text)
-    text = re.sub(r"\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\b", "<column>", text)
-    text = re.sub(r"\b\d+(?:\.\d+)?\b", "<number>", text)
-    text = abstract_bare_sql_identifiers(text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def abstract_bare_sql_identifiers(text: str) -> str:
-    keywords = {
-        "SELECT",
-        "FROM",
-        "WHERE",
-        "JOIN",
-        "INNER",
-        "LEFT",
-        "RIGHT",
-        "FULL",
-        "OUTER",
-        "ON",
-        "GROUP",
-        "BY",
-        "ORDER",
-        "HAVING",
-        "LIMIT",
-        "ASC",
-        "DESC",
-        "AS",
-        "AND",
-        "OR",
-        "NOT",
-        "IS",
-        "NULL",
-        "IN",
-        "BETWEEN",
-        "LIKE",
-        "CASE",
-        "WHEN",
-        "THEN",
-        "ELSE",
-        "END",
-        "DISTINCT",
-        "COUNT",
-        "SUM",
-        "AVG",
-        "MIN",
-        "MAX",
-        "CAST",
-        "STRFTIME",
-        "DATE",
-        "DATETIME",
-        "REAL",
-        "INTEGER",
-        "TEXT",
-        "NULLIF",
-        "COALESCE",
-        "OVER",
-        "PARTITION",
-        "ROW_NUMBER",
-        "RANK",
-        "WITH",
-        "UNION",
-        "ALL",
-    }
-
-    def repl(match: re.Match[str]) -> str:
-        token = match.group(0)
-        if token.upper() in keywords:
-            return token.upper()
-        return "<column>"
-
-    text = re.sub(r"(?<!<)\b[A-Za-z_][A-Za-z0-9_]*\b(?!>)", repl, text)
-    text = re.sub(r"\bFROM\s+<column>", "FROM <table>", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bJOIN\s+<column>", "JOIN <table>", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bAS\s+<column>", "AS <alias>", text, flags=re.IGNORECASE)
-    return text
+    return compact_text(value)
 
 
 def first_compact_line(values: Any) -> str:
