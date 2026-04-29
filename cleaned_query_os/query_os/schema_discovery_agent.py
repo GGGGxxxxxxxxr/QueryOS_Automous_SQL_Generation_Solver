@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from .llm import create_chat_completion, create_llm_backend, is_fatal_llm_error, safe_llm_error
-from .metadata import SchemaMetadataStore, parse_foreign_key
+from .metadata import SchemaMetadataStore, normalize_name, parse_foreign_key
 from .prompts import build_schema_discovery_system_prompt
 from .state import AgentName, AgentReturn, SharedState, TableEvidence
 from .tracing import EventTracer, NULL_TRACER
@@ -482,7 +482,7 @@ class SchemaDiscoveryAgent:
                 metadata.verify_foreign_keys(table, foreign_keys, "foreign_keys")
             state.discovered.tables[table] = TableEvidence(
                 table=table,
-                columns=clean_columns(columns),
+                columns=hydrate_columns_from_metadata(table, columns, metadata),
                 primary_keys=primary_key,
                 foreign_keys=clean_foreign_keys(foreign_keys),
             )
@@ -500,7 +500,7 @@ class SchemaDiscoveryAgent:
             if foreign_keys:
                 metadata.verify_foreign_keys(table, foreign_keys, "foreign_keys")
             ev = state.discovered.tables.setdefault(table, TableEvidence(table=table))
-            add_or_replace_columns(ev, clean_columns(add_columns))
+            add_or_replace_columns(ev, hydrate_columns_from_metadata(table, add_columns, metadata))
             add_or_replace_foreign_keys(ev, clean_foreign_keys(foreign_keys))
             remove_foreign_keys_from_table(ev, clean_foreign_keys(remove_foreign_keys))
             return {"ok": True, "action": name, "table": table}, f"enriched {table}", False
@@ -638,6 +638,41 @@ def clean_columns(columns: List[Any]) -> List[Dict[str, str]]:
             item["desc"] = str(col.get("desc"))
         out.append(item)
     return out
+
+
+def hydrate_columns_from_metadata(
+    table: str,
+    columns: List[Any],
+    metadata: SchemaMetadataStore,
+) -> List[Dict[str, str]]:
+    """Return canonical column entries enriched with metadata type/description.
+
+    The LLM only needs to identify the column name. Once verified, QueryOS uses
+    the table metadata as source of truth so shared state consistently contains
+    column descriptions for downstream workers.
+    """
+    table_obj = metadata.get_table(table)
+    metadata_columns = {
+        normalize_name(str(col.get("name", ""))): col
+        for col in table_obj.get("columns", []) or []
+        if isinstance(col, dict) and col.get("name")
+    }
+    hydrated: List[Dict[str, str]] = []
+    for col in clean_columns(columns):
+        key = normalize_name(str(col.get("name", "")))
+        meta_col = metadata_columns.get(key) or {}
+        name = str(meta_col.get("name") or col.get("name") or "").strip()
+        if not name:
+            continue
+        item = {
+            "name": name,
+            "type": str(meta_col.get("type") or col.get("type") or "UNKNOWN"),
+        }
+        desc = str(meta_col.get("desc") or meta_col.get("description") or col.get("desc") or "").strip()
+        if desc:
+            item["desc"] = desc
+        hydrated.append(item)
+    return hydrated
 
 
 def clean_foreign_keys(foreign_keys: List[Any]) -> List[Dict[str, str]]:
