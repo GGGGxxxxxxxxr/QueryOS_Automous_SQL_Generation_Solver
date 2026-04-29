@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+CLEANED_QUERYOS_ROOT = SCRIPT_DIR.parent
+if str(CLEANED_QUERYOS_ROOT) not in sys.path:
+    sys.path.insert(0, str(CLEANED_QUERYOS_ROOT))
+
+from extractor import extract_and_route_record  # noqa: E402
+from io_utils import append_jsonl, filter_records, load_jsonl, load_processed_question_ids, write_json  # noqa: E402
+from query_os.config import cfg_get, load_yaml_config, pick  # noqa: E402
+from query_os.llm import create_llm_backend, safe_llm_error  # noqa: E402
+from taxonomy import apply_taxonomy_routing, build_general_mistake_set, load_taxonomy, normalize_atomic_items  # noqa: E402
+from text_utils import clean_text, safe_int, sanitize_output_obj  # noqa: E402
+
+
+def main() -> int:
+    args = parse_args()
+    paths = build_output_paths(args)
+
+    if args.reset:
+        for path in generated_output_paths(paths):
+            if path.exists():
+                path.unlink()
+
+    config = load_yaml_config(args.config)
+    provider, model, client = build_llm(args, config)
+    temperature = float(args.temperature if args.temperature is not None else cfg_get(config, "temperature", 0.2))
+    taxonomy = load_taxonomy(paths["taxonomy"])
+    processed_question_ids = load_processed_question_ids(paths["atomic"]) | load_processed_question_ids(paths["ignored"])
+
+    records = list(load_jsonl(paths["error_bank"]))
+    records = filter_records(records, question_ids=args.question_id)
+    if args.offset:
+        records = records[args.offset :]
+    if args.limit is not None:
+        records = records[: args.limit]
+
+    print(f"[general-mistakes] error bank: {paths['error_bank']}")
+    print(f"[general-mistakes] output dir: {paths['out_dir']}")
+    print(f"[general-mistakes] selected records: {len(records)}")
+    print(f"[general-mistakes] provider={provider} model={model}")
+    print(f"[general-mistakes] promotion threshold: {args.promotion_threshold}")
+
+    counters = {"processed": 0, "skipped": 0, "ignored": 0, "atomic": 0, "promoted": 0, "errors": 0}
+    for idx, record in enumerate(records, start=1):
+        process_one_record(
+            args=args,
+            idx=idx,
+            total=len(records),
+            record=record,
+            client=client,
+            model=model,
+            temperature=temperature,
+            taxonomy=taxonomy,
+            processed_question_ids=processed_question_ids,
+            paths=paths,
+            counters=counters,
+        )
+
+    write_json(paths["taxonomy"], sanitize_output_obj(taxonomy))
+    write_json(paths["mistake_set"], build_general_mistake_set(taxonomy))
+    print(
+        "[general-mistakes] done | "
+        f"processed={counters['processed']} skipped={counters['skipped']} "
+        f"ignored={counters['ignored']} atomic={counters['atomic']} "
+        f"promoted={counters['promoted']} errors={counters['errors']}"
+    )
+    return 0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build a self-expanding general mistake set from a QueryOS error memory bank. "
+            "Outputs are isolated from the QueryOS runtime package."
+        )
+    )
+    parser.add_argument("--error-bank", required=True, help="Path to error_bank.jsonl.")
+    parser.add_argument("--out", required=True, help="Output directory for generated artifacts.")
+    parser.add_argument("--config", default=str(CLEANED_QUERYOS_ROOT / "queryos_config.yaml"))
+    parser.add_argument("--provider", choices=["openai", "vllm"], help="LLM provider override.")
+    parser.add_argument("--api-key")
+    parser.add_argument("--base-url")
+    parser.add_argument("--model", help="Model override. Defaults to YAML model.")
+    parser.add_argument("--temperature", type=float, help="LLM temperature override.")
+    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--llm-timeout-seconds", type=float)
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--question-id", type=int, action="append")
+    parser.add_argument("--promotion-threshold", type=int, default=3)
+    parser.add_argument("--active-preview-limit", type=int, default=40)
+    parser.add_argument("--proposed-preview-limit", type=int, default=80)
+    parser.add_argument("--record-max-chars", type=int, default=16000)
+    parser.add_argument("--reset", action="store_true", help="Rebuild outputs instead of resuming.")
+    parser.add_argument("--stop-on-error", action="store_true")
+    return parser.parse_args()
+
+
+def build_output_paths(args: argparse.Namespace) -> Dict[str, Path]:
+    error_bank = Path(args.error_bank).expanduser().resolve()
+    out_dir = Path(args.out).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "error_bank": error_bank,
+        "out_dir": out_dir,
+        "atomic": out_dir / "atomic_mistakes.jsonl",
+        "taxonomy": out_dir / "taxonomy.json",
+        "mistake_set": out_dir / "general_mistake_set.json",
+        "ignored": out_dir / "ignored_traces.jsonl",
+        "run_log": out_dir / "run_log.jsonl",
+    }
+
+
+def generated_output_paths(paths: Dict[str, Path]) -> list[Path]:
+    return [
+        paths["atomic"],
+        paths["taxonomy"],
+        paths["mistake_set"],
+        paths["ignored"],
+        paths["run_log"],
+    ]
+
+
+def build_llm(args: argparse.Namespace, config: Dict[str, Any]) -> tuple[str, str, Any]:
+    router_config = cfg_get(config, "llm_router", {})
+    if not isinstance(router_config, dict):
+        router_config = {}
+    provider_default = "vllm" if router_config.get("enabled") else "openai"
+    provider = pick(args.provider, config, "provider", provider_default)
+    model = pick(args.model, config, "models.general_mistake_extractor", None) or pick(
+        args.model,
+        config,
+        "model",
+        "gpt-4.1-mini",
+    )
+    timeout = args.llm_timeout_seconds or cfg_get(config, "llm_timeout_seconds", None)
+    client = create_llm_backend(
+        provider=provider,
+        api_key=pick(args.api_key, config, "api_key", None),
+        base_url=pick(args.base_url, config, "base_url", None),
+        model=model,
+        router_config=router_config,
+        timeout=timeout,
+    )
+    return str(provider), str(model), client
+
+
+def process_one_record(
+    *,
+    args: argparse.Namespace,
+    idx: int,
+    total: int,
+    record: Dict[str, Any],
+    client: Any,
+    model: str,
+    temperature: float,
+    taxonomy: Dict[str, Any],
+    processed_question_ids: set[int],
+    paths: Dict[str, Path],
+    counters: Dict[str, int],
+) -> None:
+    question_id = safe_int(record.get("question_id"), default=-1)
+    if question_id in processed_question_ids:
+        counters["skipped"] += 1
+        print(f"[{idx}/{total}] q{question_id} skip existing")
+        return
+
+    print(f"[{idx}/{total}] q{question_id} extract")
+    try:
+        result = extract_and_route_record(
+            client=client,
+            model=model,
+            temperature=temperature,
+            max_tokens=args.max_tokens,
+            record=record,
+            taxonomy=taxonomy,
+            active_preview_limit=args.active_preview_limit,
+            proposed_preview_limit=args.proposed_preview_limit,
+            record_max_chars=args.record_max_chars,
+        )
+        skip_info = normalized_skip_info(result)
+        if skip_info["skip"]:
+            append_jsonl(
+                paths["ignored"],
+                {
+                    "source_question_id": question_id,
+                    "db_id": str(record.get("db_id") or ""),
+                    "difficulty": str(record.get("difficulty") or ""),
+                    "reason": skip_info["reason"],
+                },
+            )
+            append_run_log(paths["run_log"], question_id, "ignored_unreliable_trace", reason=skip_info["reason"])
+            counters["ignored"] += 1
+            counters["processed"] += 1
+            processed_question_ids.add(question_id)
+            return
+
+        atomic_items = normalize_atomic_items(result, record)
+        if not atomic_items:
+            append_run_log(paths["run_log"], question_id, "no_atomic_mistakes")
+            counters["processed"] += 1
+            processed_question_ids.add(question_id)
+            return
+
+        for item in atomic_items:
+            update = apply_taxonomy_routing(
+                taxonomy=taxonomy,
+                atomic=item,
+                promotion_threshold=args.promotion_threshold,
+            )
+            item["routing_result"] = update
+            append_jsonl(paths["atomic"], sanitize_output_obj(item))
+            counters["atomic"] += 1
+            if update.get("promoted"):
+                counters["promoted"] += 1
+
+        write_json(paths["taxonomy"], sanitize_output_obj(taxonomy))
+        write_json(paths["mistake_set"], build_general_mistake_set(taxonomy))
+        append_run_log(paths["run_log"], question_id, "processed", atomic_count=len(atomic_items))
+        counters["processed"] += 1
+        processed_question_ids.add(question_id)
+    except Exception as exc:
+        counters["errors"] += 1
+        err = safe_llm_error(exc)
+        append_run_log(paths["run_log"], question_id, "error", error=err)
+        print(f"[{idx}/{total}] q{question_id} error: {err}")
+        if args.stop_on_error:
+            raise
+
+
+def append_run_log(path: Path, question_id: int, status: str, **extra: Any) -> None:
+    payload = {"question_id": question_id, "status": status, "created_at": int(time.time())}
+    payload.update(extra)
+    append_jsonl(path, payload)
+
+
+def normalized_skip_info(result: Dict[str, Any]) -> Dict[str, Any]:
+    raw = result.get("skip_failure_trace")
+    if isinstance(raw, bool):
+        return {"skip": raw, "reason": "LLM marked this trace as unsafe for taxonomy learning."}
+    if not isinstance(raw, dict):
+        return {"skip": False, "reason": ""}
+    return {
+        "skip": bool(raw.get("skip")),
+        "reason": clean_text(raw.get("reason")) or "Trace marked unsafe for taxonomy learning.",
+    }
