@@ -87,3 +87,20 @@ When a proposed type reaches `--promotion-threshold`, it is promoted to active.
 
 `ignored_traces.jsonl` stores records that were skipped because they appeared
 unsafe for taxonomy learning.
+
+`general_mistake_set.json` is intentionally compact. It keeps only active types
+and two runtime-facing fields:
+
+```json
+{
+  "id": "sql_logic.aggregation_scope_mismatch",
+  "family": "sql_logic",
+  "name": "Aggregation Scope Mismatch",
+  "error_reason": "The SQL computes at the wrong entity or grouping level.",
+  "typical_error_shape": "Aggregating before identifying the intended answer scope.",
+  "support_count": 3
+}
+```
+
+Detailed accumulated evidence stays in `taxonomy.json`; the compact mistake set
+is the artifact intended for future retrieval or prompt injection.

@@ -32,6 +32,14 @@ Hard constraints:
 - Before extracting mistakes, decide whether this failed-run record is reliable enough to learn from.
 - If the offline comparison behavior is clearly inconsistent with the natural-language question/evidence, mark the trace as skipped and do not extract atomic mistakes.
 - Skip only when the comparison behavior is clearly wrong or self-contradictory, not merely because the failed SQL looks plausible.
+- Keep reusable rule fields compact and abstract.
+- Do not put concrete database names, table names, column names, place names, organization names, or literal values in observed_failure, risky_behavior, diagnostic_signals, repair_principle, exceptions, type_definition, inclusion_criteria, or exclusion_criteria.
+- Do not include parenthetical examples in reusable rule fields.
+- If concrete SQL shapes are useful, put them only in risky_sql_shapes.
+- Keep each bullet under 18 words.
+- Prefer one precise mistake type over broad buckets that mix unrelated causes.
+- Focus on two reusable facts: the error reason and the typical error shape.
+- Keep repair and exception fields minimal; they are debug metadata, not the final runtime memory.
 
 Return one JSON object with this exact shape:
 {
@@ -42,10 +50,10 @@ Return one JSON object with this exact shape:
   "atomic_mistakes": [
     {
       "observed_failure": "short real-world failure description",
-      "risky_behavior": ["general risky SQL behavior"],
-      "diagnostic_signals": ["how a SQL agent can notice this risk without any hidden answer"],
+      "risky_behavior": ["1-2 general risky SQL behaviors"],
+      "diagnostic_signals": ["1-3 ways a SQL agent can notice this risk without any hidden answer"],
       "repair_principle": "general repair rule",
-      "exceptions": ["anti-overgeneralization / when not to apply"],
+      "exceptions": ["0-2 anti-overgeneralization notes"],
       "risky_sql_shapes": ["optional short SQL shape examples"],
       "proposed_family": "one top-level family id",
       "proposed_type": "snake_case general type name",

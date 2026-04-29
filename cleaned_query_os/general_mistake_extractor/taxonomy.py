@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -163,17 +164,17 @@ def add_support(target: Dict[str, Any], atomic: Dict[str, Any]) -> None:
     if atomic_id and atomic_id not in examples:
         examples.append(atomic_id)
     target["example_atomic_ids"] = examples[:50]
-    extend_unique(target, "risky_behavior", atomic.get("risky_behavior") or [], limit=20)
-    extend_unique(target, "diagnostic_signals", atomic.get("diagnostic_signals") or [], limit=20)
+    extend_unique(target, "risky_behavior", atomic.get("risky_behavior") or [], limit=6)
+    extend_unique(target, "diagnostic_signals", atomic.get("diagnostic_signals") or [], limit=6)
     extend_unique(
         target,
         "repair_principles",
         [atomic.get("repair_principle")] if atomic.get("repair_principle") else [],
-        limit=10,
+        limit=3,
     )
-    extend_unique(target, "exceptions", atomic.get("exceptions") or [], limit=20)
-    extend_unique(target, "inclusion_criteria", atomic.get("inclusion_criteria") or [], limit=20)
-    extend_unique(target, "exclusion_criteria", atomic.get("exclusion_criteria") or [], limit=20)
+    extend_unique(target, "exceptions", atomic.get("exceptions") or [], limit=3)
+    extend_unique(target, "inclusion_criteria", atomic.get("inclusion_criteria") or [], limit=6)
+    extend_unique(target, "exclusion_criteria", atomic.get("exclusion_criteria") or [], limit=6)
 
 
 def maybe_promote_type(taxonomy: Dict[str, Any], proposed: Dict[str, Any], threshold: int) -> Dict[str, Any]:
@@ -208,7 +209,7 @@ def merge_type_support(target: Dict[str, Any], source: Dict[str, Any]) -> None:
         "inclusion_criteria",
         "exclusion_criteria",
     ):
-        extend_unique(target, field, source.get(field) or [], limit=50)
+        extend_unique(target, field, source.get(field) or [], limit=compact_field_limit(field))
 
 
 def build_general_mistake_set(taxonomy: Dict[str, Any]) -> Dict[str, Any]:
@@ -220,13 +221,9 @@ def build_general_mistake_set(taxonomy: Dict[str, Any]) -> Dict[str, Any]:
             {
                 "id": item.get("id"),
                 "family": item.get("family"),
-                "type": item.get("type"),
                 "name": item.get("name"),
-                "definition": item.get("definition"),
-                "risky_behavior": item.get("risky_behavior", []),
-                "how_to_detect": item.get("diagnostic_signals", []),
-                "repair_principles": item.get("repair_principles", []),
-                "exceptions": item.get("exceptions", []),
+                "error_reason": compact_error_reason(item),
+                "typical_error_shape": compact_typical_error_shape(item),
                 "support_count": item.get("support_count", 0),
             }
         )
@@ -234,10 +231,36 @@ def build_general_mistake_set(taxonomy: Dict[str, Any]) -> Dict[str, Any]:
     return sanitize_output_obj(
         {
             "version": 1,
-            "families": taxonomy.get("families", SEED_FAMILIES),
+            "families": list((taxonomy.get("families") or SEED_FAMILIES).keys()),
             "mistakes": mistakes,
         }
     )
+
+
+def compact_error_reason(item: Dict[str, Any]) -> str:
+    candidates = [
+        item.get("definition"),
+        first_compact_line(item.get("risky_behavior", [])),
+        first_compact_line(item.get("diagnostic_signals", [])),
+    ]
+    for candidate in candidates:
+        text = compact_text(candidate)
+        if text:
+            return text
+    return "Reusable SQL reasoning mistake."
+
+
+def compact_typical_error_shape(item: Dict[str, Any]) -> str:
+    candidates = [
+        first_compact_line(item.get("risky_behavior", [])),
+        first_compact_line(item.get("diagnostic_signals", [])),
+        first_compact_line(item.get("repair_principles", [])),
+    ]
+    for candidate in candidates:
+        text = compact_text(candidate)
+        if text:
+            return text
+    return "The SQL shape does not match the requested answer semantics."
 
 
 def load_taxonomy(path: Path) -> Dict[str, Any]:
@@ -298,3 +321,65 @@ def extend_unique(target: Dict[str, Any], field: str, values: List[Any], limit: 
             cur.append(value)
     target[field] = cur[:limit]
 
+
+def compact_field_limit(field: str) -> int:
+    if field in {"supporting_question_ids", "example_atomic_ids"}:
+        return 50
+    if field in {"repair_principles", "exceptions"}:
+        return 3
+    return 6
+
+
+def first_compact_line(values: Any) -> str:
+    lines = compact_lines(values, limit=1)
+    return lines[0] if lines else ""
+
+
+def compact_lines(values: Any, *, limit: int) -> List[str]:
+    if not isinstance(values, list):
+        values = [values] if values else []
+    result = []
+    for value in values:
+        if is_too_specific_runtime_line(value):
+            continue
+        text = compact_text(value)
+        if not text or text in result:
+            continue
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def compact_text(value: Any) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    text = strip_parenthetical_examples(text)
+    text = re.sub(r"`[^`]+`", "schema field", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return shorten_sentence(text, max_words=28)
+
+
+def is_too_specific_runtime_line(value: Any) -> bool:
+    text = str(value or "")
+    lowered = text.lower()
+    return (
+        "`" in text
+        or "not the case here" in lowered
+        or "e.g." in lowered
+        or "for example" in lowered
+    )
+
+
+def strip_parenthetical_examples(text: str) -> str:
+    text = re.sub(r"\s*\([^)]*(?:e\.g\.|for example)[^)]*\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*\([^)]{0,80}(?:`[^`]+`)[^)]{0,80}\)", "", text)
+    return text.strip()
+
+
+def shorten_sentence(text: str, *, max_words: int) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words]).rstrip(" ,;:") + "..."
