@@ -149,8 +149,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-tuples-per-type",
         type=int,
-        default=5,
-        help="Maximum representative pattern tuples kept per active type in general_mistake_set.json.",
+        default=0,
+        help=(
+            "Optional hard cap for representative pattern tuples per active type. "
+            "Default 0 lets the LLM decide how many unique patterns to keep."
+        ),
     )
     parser.add_argument(
         "--tuple-dedupe-review-limit",
@@ -352,8 +355,8 @@ def dedupe_active_type_patterns(
     threshold = max(0, int(args.tuple_dedupe_threshold or 0))
     if threshold <= 0:
         return 0
-    max_patterns = max(1, int(args.max_tuples_per_type or 1))
-    review_limit = max(max_patterns, int(args.tuple_dedupe_review_limit or 0))
+    max_patterns = max(0, int(args.max_tuples_per_type or 0))
+    review_limit = max(1, max_patterns, int(args.tuple_dedupe_review_limit or 0))
     runs = 0
     for item in taxonomy.get("active_types", []):
         if not isinstance(item, dict):

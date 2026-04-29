@@ -392,7 +392,7 @@ def compact_proposed_capacity_candidates(taxonomy: Dict[str, Any], limit: int) -
     return result
 
 
-def build_general_mistake_set(taxonomy: Dict[str, Any], *, pattern_limit: int = 10) -> Dict[str, Any]:
+def build_general_mistake_set(taxonomy: Dict[str, Any], *, pattern_limit: int = 0) -> Dict[str, Any]:
     mistakes = []
     for item in taxonomy.get("active_types", []):
         if not isinstance(item, dict):

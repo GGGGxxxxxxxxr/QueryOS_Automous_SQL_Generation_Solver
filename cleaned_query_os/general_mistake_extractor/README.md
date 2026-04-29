@@ -55,8 +55,7 @@ python cleaned_query_os/general_mistake_extractor/build_general_mistakes.py \
   --limit 20 \
   --proposal-stale-after 50 \
   --max-proposed-types 100 \
-  --tuple-dedupe-threshold 8 \
-  --max-tuples-per-type 5
+  --tuple-dedupe-threshold 8
 ```
 
 OpenAI example:
@@ -153,10 +152,13 @@ not be collapsed during online collection.
 
 After all selected records are processed, the extractor can run a final
 intra-type dedupe pass. When an active type has at least
-`--tuple-dedupe-threshold` raw tuples, the LLM merges near-duplicates into at
-most `--max-tuples-per-type` representative tuples. This keeps raw learning
-fine-grained while keeping `general_mistake_set.json` readable. Use
+`--tuple-dedupe-threshold` raw tuples, the LLM merges near-duplicates and
+decides how many unique representative tuples should remain. This keeps raw
+learning fine-grained while keeping `general_mistake_set.json` readable. Use
 `--tuple-dedupe-threshold 0` to disable the final tuple pass.
+
+`--max-tuples-per-type` is optional. Its default is `0`, which means no hard
+cap. Set it only when you explicitly want a maximum output size.
 
 `ignored_traces.jsonl` stores records that were skipped because they appeared
 unsafe for taxonomy learning.

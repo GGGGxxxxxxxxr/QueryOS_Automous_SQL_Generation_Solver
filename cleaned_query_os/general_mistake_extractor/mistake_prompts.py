@@ -291,13 +291,18 @@ def build_tuple_dedupe_user_prompt(
         "family": type_item.get("family"),
         "name": type_item.get("name"),
         "support_count": type_item.get("support_count", 0),
-        "max_output_patterns": max_patterns,
         "pattern_tuples": raw_patterns,
     }
+    if max_patterns > 0:
+        type_view["max_output_patterns"] = max_patterns
+        output_policy = "Return at most max_output_patterns representative tuple patterns."
+    else:
+        type_view["output_policy"] = "No fixed maximum. Return exactly the unique representative tuple patterns you judge necessary."
+        output_policy = "There is no fixed maximum. Return exactly the unique representative tuple patterns you judge necessary."
     return (
         "Deduplicate pattern tuples for this one mistake type:\n"
         f"{json.dumps(type_view, ensure_ascii=False, indent=2)}\n\n"
-        "Return at most max_output_patterns representative tuple patterns. "
+        f"{output_policy} "
         "Merge only truly redundant tuples; keep different wrong SQL shapes separate. "
         "Use abstract placeholders such as <table>, <column>, <condition>, <metric>, <group_key>, <date_col>. "
         "Output JSON only."
