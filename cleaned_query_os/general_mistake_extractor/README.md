@@ -14,7 +14,10 @@ Build a self-expanding general mistake set:
 error_bank.jsonl
    |
    v
-atomic general mistakes
+stage 1: route against active/proposed mistake types
+   |
+   v
+stage 2: propose a new type only for unmatched mistakes
    |
    v
 active/proposed type pool
@@ -46,7 +49,9 @@ python cleaned_query_os/general_mistake_extractor/build_general_mistakes.py \
   --out dev_20240627-2/general_mistakes \
   --config cleaned_query_os/queryos_vllm_config.yaml \
   --provider vllm \
-  --limit 20
+  --limit 20 \
+  --proposal-stale-after 50 \
+  --max-proposed-types 100
 ```
 
 OpenAI example:
@@ -77,30 +82,73 @@ general_mistakes/
 - active mistake types
 - proposed mistake types
 
+Seed families are intentionally limited to `database_reasoning`, `sql_logic`,
+and `output_format`.
+
+Mistake type records are intentionally small:
+
+```json
+{
+  "proposal_id": "PT-000001",
+  "family": "sql_logic",
+  "type": "aggregation_scope_mismatch",
+  "id": "sql_logic.aggregation_scope_mismatch",
+  "name": "Aggregation Scope Mismatch",
+  "error": "The SQL computes at the wrong entity or grouping level.",
+  "typical_shape": "SELECT <column>, AVG(<column>) FROM <table> GROUP BY <column>",
+  "correct_pattern": "SELECT <column> FROM <table> ORDER BY <column> DESC LIMIT <number>",
+  "support_count": 1,
+  "created_sample_idx": 12,
+  "last_vote_sample_idx": 12,
+  "status": "proposed"
+}
+```
+
 Each new atomic mistake can:
 
 - attach to an active type
 - vote for an existing proposed type
 - propose a new type
 
+The extractor enforces this as a two-step workflow. Stage 1 displays the current
+active and proposed types and can only return `ATTACH_ACTIVE`, `VOTE_PROPOSED`,
+or `NEED_NEW_TYPE`. Stage 2 runs only for `NEED_NEW_TYPE` items and is the only
+place where a new proposed type can be created.
+
 When a proposed type reaches `--promotion-threshold`, it is promoted to active.
+When a proposed type receives no votes for `--proposal-stale-after` later
+processed samples, it is discarded. Use `--proposal-stale-after 0` to disable
+this pruning.
+
+When the proposed pool grows beyond `--max-proposed-types`, the extractor starts
+a capacity-cleanup LLM pass. That pass can only return proposed IDs to discard;
+it is used to remove near-duplicates, overly narrow proposals, vague proposals,
+or low-support entries that are unlikely to become stable general mistakes. Use
+`--max-proposed-types 0` to disable this cleanup.
 
 `ignored_traces.jsonl` stores records that were skipped because they appeared
 unsafe for taxonomy learning.
 
 `general_mistake_set.json` is intentionally compact. It keeps only active types
-and two runtime-facing fields:
+and the three runtime-facing fields:
 
 ```json
 {
   "id": "sql_logic.aggregation_scope_mismatch",
   "family": "sql_logic",
   "name": "Aggregation Scope Mismatch",
-  "error_reason": "The SQL computes at the wrong entity or grouping level.",
-  "typical_error_shape": "Aggregating before identifying the intended answer scope.",
+  "error": "The SQL computes at the wrong entity or grouping level.",
+  "typical_shape": "SELECT <group_key>, AVG(<metric>) FROM <table> GROUP BY <group_key>",
+  "correct_pattern": "SELECT <column> FROM <table> ORDER BY <metric> DESC LIMIT <number>",
   "support_count": 3
 }
 ```
 
-Detailed accumulated evidence stays in `taxonomy.json`; the compact mistake set
-is the artifact intended for future retrieval or prompt injection.
+Each mistake type is summarized as:
+
+- `error`: what reasoning failure happens
+- `typical_shape`: the common risky SQL shape, preferably as an abstract skeleton
+- `correct_pattern`: the ideal SQL shape or repair pattern, also abstract when possible
+
+Detailed per-sample evidence stays in `atomic_mistakes.jsonl`; `taxonomy.json`
+and `general_mistake_set.json` stay compact.

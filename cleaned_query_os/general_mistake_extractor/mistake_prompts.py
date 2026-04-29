@@ -11,35 +11,23 @@ from constants import (
     EVAL_SQL_KEY,
     SEED_FAMILIES,
 )
-from taxonomy import compact_types
+from taxonomy import compact_proposed_capacity_candidates, compact_types
 from text_utils import sanitize_input_text, truncate
 
 
-def build_system_prompt() -> str:
-    return """You are building a real-world SQL-agent mistake memory.
+def build_routing_system_prompt() -> str:
+    return COMMON_SYSTEM_PROMPT + """
 
-The input is a failed SQL-agent run record. It may contain evaluator-only fields.
-Use all available information only to infer reusable SQL-agent mistake patterns.
+This is stage 1: route to an existing mistake type if possible.
 
-Hard constraints:
-- Do not mention or imply evaluator-only answer artifacts, hidden comparison SQL, or answer-key language in the output.
-- Do not use evaluator-specific words anywhere in any output field.
-- Do not produce database-specific lessons.
-- Abstract concrete table/column names into general SQL reasoning patterns.
-- Concrete SQL snippets may appear only as examples of risky SQL behavior.
-- Prefer existing active or proposed mistake types when they fit.
-- Create a new proposed type only when neither active nor proposed types fit.
-- Before extracting mistakes, decide whether this failed-run record is reliable enough to learn from.
-- If the offline comparison behavior is clearly inconsistent with the natural-language question/evidence, mark the trace as skipped and do not extract atomic mistakes.
-- Skip only when the comparison behavior is clearly wrong or self-contradictory, not merely because the failed SQL looks plausible.
-- Keep reusable rule fields compact and abstract.
-- Do not put concrete database names, table names, column names, place names, organization names, or literal values in observed_failure, risky_behavior, diagnostic_signals, repair_principle, exceptions, type_definition, inclusion_criteria, or exclusion_criteria.
-- Do not include parenthetical examples in reusable rule fields.
-- If concrete SQL shapes are useful, put them only in risky_sql_shapes.
-- Keep each bullet under 18 words.
-- Prefer one precise mistake type over broad buckets that mix unrelated causes.
-- Focus on two reusable facts: the error reason and the typical error shape.
-- Keep repair and exception fields minimal; they are debug metadata, not the final runtime memory.
+Mandatory stage-1 rules:
+- You must inspect the displayed active_types and proposed_types before deciding.
+- You are not allowed to invent a new type name in this stage.
+- If an active type fits, output ATTACH_ACTIVE.
+- Else if a proposed type fits, output VOTE_PROPOSED.
+- Only if neither fits, output NEED_NEW_TYPE.
+- NEED_NEW_TYPE is only a gate into stage 2. It is not a proposal.
+- Prefer VOTE_PROPOSED for near-matches with the same root cause and correction pattern.
 
 Return one JSON object with this exact shape:
 {
@@ -47,25 +35,50 @@ Return one JSON object with this exact shape:
     "skip": false,
     "reason": "why this record should or should not update the general mistake taxonomy"
   },
-  "atomic_mistakes": [
+  "routing_decisions": [
     {
-      "observed_failure": "short real-world failure description",
-      "risky_behavior": ["1-2 general risky SQL behaviors"],
-      "diagnostic_signals": ["1-3 ways a SQL agent can notice this risk without any hidden answer"],
-      "repair_principle": "general repair rule",
-      "exceptions": ["0-2 anti-overgeneralization notes"],
-      "risky_sql_shapes": ["optional short SQL shape examples"],
-      "proposed_family": "one top-level family id",
-      "proposed_type": "snake_case general type name",
-      "type_definition": "one-sentence reusable type definition",
-      "inclusion_criteria": ["what belongs in this type"],
-      "exclusion_criteria": ["what should not be classified here"],
+      "error": "one short reusable error reason",
+      "typical_shape": "abstract risky SQL skeleton or short behavior shape",
+      "correct_pattern": "abstract corrected SQL skeleton or short ideal rule",
       "routing": {
-        "decision": "ATTACH_ACTIVE | VOTE_PROPOSED | PROPOSE_NEW",
+        "decision": "ATTACH_ACTIVE | VOTE_PROPOSED | NEED_NEW_TYPE",
         "active_type_id": "required only for ATTACH_ACTIVE",
         "proposal_id": "required only for VOTE_PROPOSED",
         "confidence": 0.0,
         "reason": "why this routing is correct"
+      }
+    }
+  ]
+}
+"""
+
+
+def build_proposal_system_prompt() -> str:
+    return COMMON_SYSTEM_PROMPT + """
+
+This is stage 2: propose new mistake types only for mistakes that stage 1 marked NEED_NEW_TYPE.
+
+Mandatory stage-2 rules:
+- Propose a new type only for each provided unmatched mistake.
+- Do not route to existing active or proposed types in this stage.
+- Keep the proposed type compact and reusable.
+- The new type must not be a near-duplicate of the active/proposed taxonomy shown in stage 1.
+
+Return one JSON object with this exact shape:
+{
+  "atomic_mistakes": [
+    {
+      "error": "one short reusable error reason",
+      "typical_shape": "abstract risky SQL skeleton or short behavior shape",
+      "correct_pattern": "abstract corrected SQL skeleton or short ideal rule",
+      "proposed_family": "one top-level family id",
+      "proposed_type": "snake_case general type name",
+      "routing": {
+        "decision": "PROPOSE_NEW",
+        "active_type_id": "",
+        "proposal_id": "",
+        "confidence": 0.0,
+        "reason": "why a new type is necessary"
       }
     }
   ]
@@ -81,7 +94,72 @@ Type naming rules:
 """
 
 
-def build_user_prompt(
+def build_capacity_prune_system_prompt() -> str:
+    return COMMON_SYSTEM_PROMPT + """
+
+This is a proposed-type capacity cleanup stage.
+
+The proposed pool is larger than the configured capacity. Your job is to identify unnecessary proposed types to drop.
+
+Drop proposed types when they are:
+- near-duplicates of an active type
+- near-duplicates of another proposed type
+- too sample-specific to be reusable
+- vague, low-quality, or missing a useful error/typical_shape/correct_pattern
+- low support and unlikely to become a stable general mistake
+
+Prefer keeping proposed types with higher support, clearer SQL skeletons, and distinct correction patterns.
+Do not drop active types.
+Return enough drop candidates to reduce the proposed pool toward the configured capacity.
+
+Return one JSON object with this exact shape:
+{
+  "drop_proposals": [
+    {
+      "proposal_id": "proposal id to remove",
+      "reason": "short reason"
+    }
+  ]
+}
+"""
+
+
+COMMON_SYSTEM_PROMPT = """You are building a real-world SQL-agent mistake memory.
+
+The input is a failed SQL-agent run record. It may contain evaluator-only fields.
+Use all available information only to infer reusable SQL-agent mistake patterns.
+
+Hard constraints:
+- Do not mention or imply evaluator-only answer artifacts, hidden comparison SQL, or answer-key language in the output.
+- Do not use evaluator-specific words anywhere in any output field.
+- Do not produce database-specific lessons.
+- Abstract concrete table/column names into general SQL reasoning patterns.
+- Concrete SQL snippets may appear only as abstract SQL skeletons.
+- Before extracting mistakes, decide whether this failed-run record is reliable enough to learn from.
+- If the offline comparison behavior is clearly inconsistent with the natural-language question/evidence, mark the trace as skipped and do not extract atomic mistakes.
+- Skip only when the comparison behavior is clearly wrong or self-contradictory, not merely because the failed SQL looks plausible.
+- Keep reusable rule fields compact and abstract.
+- Do not put concrete database names, table names, column names, place names, organization names, or literal values in error, typical_shape, or correct_pattern.
+- Do not include parenthetical examples in reusable rule fields.
+- Prefer one precise mistake type over broad buckets that mix unrelated causes.
+- Prefer an existing near-match over creating a slightly more precise duplicate.
+- Focus on three reusable facts: error reason, typical error SQL pattern, and ideal SQL pattern.
+- Keep all fields minimal. Do not produce long criteria lists.
+- When possible, express typical error shape as an abstract SQL skeleton.
+- Use placeholders such as <table>, <column>, <condition>, <group_key>, <metric>, <date_col>, <value>.
+- Good typical_shape examples:
+  - SELECT <group_key>, COUNT(*) FROM <table> WHERE <condition> GROUP BY <group_key>
+  - WHERE DATE(<date_col>) = DATE(<literal>) when direct comparison is enough
+  - SELECT <id>, <col1> UNION SELECT <id>, <col2> when paired columns should stay together
+- Good correct_pattern examples:
+  - SELECT <group_key>, COUNT(*) FROM <table> WHERE <required_subset_filter> GROUP BY <group_key>
+  - WHERE <date_col> = <date_literal>
+  - SELECT <id>, <col1>, <col2> FROM <table>
+- Do not use concrete table names, column names, literal values, or database-specific entities in SQL shapes.
+"""
+
+
+def build_routing_user_prompt(
     *,
     record: Dict[str, Any],
     taxonomy: Dict[str, Any],
@@ -97,15 +175,68 @@ def build_user_prompt(
         "proposed_types": compact_types(taxonomy.get("proposed_types", []), proposed_preview_limit),
     }
     return (
-        "Current mistake taxonomy state:\n"
+        "Current active and proposed mistake taxonomy state:\n"
         f"{json.dumps(taxonomy_view, ensure_ascii=False, indent=2)}\n\n"
         "New failed-run record for offline analysis:\n"
         f"{record_text}\n\n"
         "First decide whether this record is safe to learn from. If the offline comparison "
         "behavior is clearly inconsistent with the user question or evidence, set "
-        "skip_failure_trace.skip=true and return no atomic mistakes. Otherwise extract "
-        "reusable general mistake patterns and route each one to an active type, an "
-        "existing proposed type, or a new proposed type. Output JSON only."
+        "skip_failure_trace.skip=true and return no routing decisions. Otherwise display "
+        "your decision through routing_decisions only. You must not propose any new type "
+        "in this stage. If no active/proposed type fits, use NEED_NEW_TYPE. Output JSON only."
+    )
+
+
+def build_proposal_user_prompt(
+    *,
+    record: Dict[str, Any],
+    taxonomy: Dict[str, Any],
+    unmatched_decisions: Any,
+    active_preview_limit: int,
+    proposed_preview_limit: int,
+    record_max_chars: int,
+) -> str:
+    safe_record = build_safe_record_for_llm(record)
+    record_text = truncate(json.dumps(safe_record, ensure_ascii=False, indent=2), record_max_chars)
+    taxonomy_view = {
+        "families": taxonomy.get("families", SEED_FAMILIES),
+        "active_types": compact_types(taxonomy.get("active_types", []), active_preview_limit),
+        "proposed_types": compact_types(taxonomy.get("proposed_types", []), proposed_preview_limit),
+    }
+    unmatched_text = json.dumps(unmatched_decisions, ensure_ascii=False, indent=2)
+    return (
+        "Current active and proposed mistake taxonomy state from stage 1:\n"
+        f"{json.dumps(taxonomy_view, ensure_ascii=False, indent=2)}\n\n"
+        "Failed-run record for offline analysis:\n"
+        f"{record_text}\n\n"
+        "Stage-1 unmatched mistakes that require a new type:\n"
+        f"{unmatched_text}\n\n"
+        "Now propose new reusable mistake types only for these unmatched mistakes. "
+        "Do not create near-duplicates of active_types or proposed_types. Output JSON only."
+    )
+
+
+def build_capacity_prune_user_prompt(
+    *,
+    taxonomy: Dict[str, Any],
+    max_proposed_types: int,
+    target_drop_count: int,
+    review_limit: int,
+) -> str:
+    taxonomy_view = {
+        "families": taxonomy.get("families", SEED_FAMILIES),
+        "active_types": compact_types(taxonomy.get("active_types", []), 80),
+        "proposed_drop_candidates": compact_proposed_capacity_candidates(taxonomy, review_limit),
+        "current_proposed_count": len(taxonomy.get("proposed_types", [])),
+        "max_proposed_types": max_proposed_types,
+        "target_drop_count": target_drop_count,
+    }
+    return (
+        "Current active types and proposed drop candidates:\n"
+        f"{json.dumps(taxonomy_view, ensure_ascii=False, indent=2)}\n\n"
+        "Choose only proposed IDs from proposed_drop_candidates. "
+        "Prefer dropping near-duplicates, vague entries, overly narrow entries, and low-support stale entries. "
+        "Output JSON only."
     )
 
 

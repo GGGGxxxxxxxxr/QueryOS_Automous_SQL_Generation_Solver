@@ -12,11 +12,19 @@ CLEANED_QUERYOS_ROOT = SCRIPT_DIR.parent
 if str(CLEANED_QUERYOS_ROOT) not in sys.path:
     sys.path.insert(0, str(CLEANED_QUERYOS_ROOT))
 
-from extractor import extract_and_route_record  # noqa: E402
+from extractor import extract_and_route_record, select_unnecessary_proposals  # noqa: E402
 from io_utils import append_jsonl, filter_records, load_jsonl, load_processed_question_ids, write_json  # noqa: E402
 from query_os.config import cfg_get, load_yaml_config, pick  # noqa: E402
 from query_os.llm import create_llm_backend, safe_llm_error  # noqa: E402
-from taxonomy import apply_taxonomy_routing, build_general_mistake_set, load_taxonomy, normalize_atomic_items  # noqa: E402
+from taxonomy import (  # noqa: E402
+    advance_taxonomy_sample,
+    apply_taxonomy_routing,
+    build_general_mistake_set,
+    drop_proposals_by_ids,
+    load_taxonomy,
+    normalize_atomic_items,
+    prune_stale_proposals,
+)
 from text_utils import clean_text, safe_int, sanitize_output_obj  # noqa: E402
 
 
@@ -47,8 +55,19 @@ def main() -> int:
     print(f"[general-mistakes] selected records: {len(records)}")
     print(f"[general-mistakes] provider={provider} model={model}")
     print(f"[general-mistakes] promotion threshold: {args.promotion_threshold}")
+    print(f"[general-mistakes] proposal stale after: {args.proposal_stale_after}")
+    print(f"[general-mistakes] max proposed types: {args.max_proposed_types}")
 
-    counters = {"processed": 0, "skipped": 0, "ignored": 0, "atomic": 0, "promoted": 0, "errors": 0}
+    counters = {
+        "processed": 0,
+        "skipped": 0,
+        "ignored": 0,
+        "atomic": 0,
+        "promoted": 0,
+        "discarded_proposals": 0,
+        "capacity_prune_runs": 0,
+        "errors": 0,
+    }
     for idx, record in enumerate(records, start=1):
         process_one_record(
             args=args,
@@ -70,7 +89,8 @@ def main() -> int:
         "[general-mistakes] done | "
         f"processed={counters['processed']} skipped={counters['skipped']} "
         f"ignored={counters['ignored']} atomic={counters['atomic']} "
-        f"promoted={counters['promoted']} errors={counters['errors']}"
+        f"promoted={counters['promoted']} discarded_proposals={counters['discarded_proposals']} "
+        f"capacity_prune_runs={counters['capacity_prune_runs']} errors={counters['errors']}"
     )
     return 0
 
@@ -96,6 +116,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--question-id", type=int, action="append")
     parser.add_argument("--promotion-threshold", type=int, default=3)
+    parser.add_argument(
+        "--proposal-stale-after",
+        type=int,
+        default=50,
+        help="Discard a proposed type if this many later processed samples do not vote for it. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--max-proposed-types",
+        type=int,
+        default=100,
+        help="Start LLM cleanup when proposed type count exceeds this value. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--proposal-capacity-review-limit",
+        type=int,
+        default=200,
+        help="Maximum number of proposed type candidates shown to the capacity cleanup LLM.",
+    )
     parser.add_argument("--active-preview-limit", type=int, default=40)
     parser.add_argument("--proposed-preview-limit", type=int, default=80)
     parser.add_argument("--record-max-chars", type=int, default=16000)
@@ -186,8 +224,10 @@ def process_one_record(
             proposed_preview_limit=args.proposed_preview_limit,
             record_max_chars=args.record_max_chars,
         )
+        sample_idx = advance_taxonomy_sample(taxonomy)
         skip_info = normalized_skip_info(result)
         if skip_info["skip"]:
+            discarded = discard_proposals(args, client, model, temperature, taxonomy, counters)
             append_jsonl(
                 paths["ignored"],
                 {
@@ -197,7 +237,17 @@ def process_one_record(
                     "reason": skip_info["reason"],
                 },
             )
-            append_run_log(paths["run_log"], question_id, "ignored_unreliable_trace", reason=skip_info["reason"])
+            write_json(paths["taxonomy"], sanitize_output_obj(taxonomy))
+            write_json(paths["mistake_set"], build_general_mistake_set(taxonomy))
+            counters["discarded_proposals"] += len(discarded)
+            append_run_log(
+                paths["run_log"],
+                question_id,
+                "ignored_unreliable_trace",
+                sample_idx=sample_idx,
+                reason=skip_info["reason"],
+                discarded_proposals=discarded,
+            )
             counters["ignored"] += 1
             counters["processed"] += 1
             processed_question_ids.add(question_id)
@@ -205,7 +255,17 @@ def process_one_record(
 
         atomic_items = normalize_atomic_items(result, record)
         if not atomic_items:
-            append_run_log(paths["run_log"], question_id, "no_atomic_mistakes")
+            discarded = discard_proposals(args, client, model, temperature, taxonomy, counters)
+            write_json(paths["taxonomy"], sanitize_output_obj(taxonomy))
+            write_json(paths["mistake_set"], build_general_mistake_set(taxonomy))
+            counters["discarded_proposals"] += len(discarded)
+            append_run_log(
+                paths["run_log"],
+                question_id,
+                "no_atomic_mistakes",
+                sample_idx=sample_idx,
+                discarded_proposals=discarded,
+            )
             counters["processed"] += 1
             processed_question_ids.add(question_id)
             return
@@ -222,9 +282,18 @@ def process_one_record(
             if update.get("promoted"):
                 counters["promoted"] += 1
 
+        discarded = discard_proposals(args, client, model, temperature, taxonomy, counters)
+        counters["discarded_proposals"] += len(discarded)
         write_json(paths["taxonomy"], sanitize_output_obj(taxonomy))
         write_json(paths["mistake_set"], build_general_mistake_set(taxonomy))
-        append_run_log(paths["run_log"], question_id, "processed", atomic_count=len(atomic_items))
+        append_run_log(
+            paths["run_log"],
+            question_id,
+            "processed",
+            sample_idx=sample_idx,
+            atomic_count=len(atomic_items),
+            discarded_proposals=discarded,
+        )
         counters["processed"] += 1
         processed_question_ids.add(question_id)
     except Exception as exc:
@@ -234,6 +303,52 @@ def process_one_record(
         print(f"[{idx}/{total}] q{question_id} error: {err}")
         if args.stop_on_error:
             raise
+
+
+def discard_proposals(
+    args: argparse.Namespace,
+    client: Any,
+    model: str,
+    temperature: float,
+    taxonomy: Dict[str, Any],
+    counters: Dict[str, int],
+) -> list[Dict[str, Any]]:
+    discarded = prune_stale_proposals(taxonomy, stale_after=max(0, int(args.proposal_stale_after or 0)))
+    discarded.extend(discard_excess_proposals(args, client, model, temperature, taxonomy, counters))
+    return discarded
+
+
+def discard_excess_proposals(
+    args: argparse.Namespace,
+    client: Any,
+    model: str,
+    temperature: float,
+    taxonomy: Dict[str, Any],
+    counters: Dict[str, int],
+) -> list[Dict[str, Any]]:
+    max_proposed = max(0, int(args.max_proposed_types or 0))
+    proposed_count = len(taxonomy.get("proposed_types", []))
+    if max_proposed <= 0 or proposed_count <= max_proposed:
+        return []
+    target_drop_count = proposed_count - max_proposed
+    drop_items = select_unnecessary_proposals(
+        client=client,
+        model=model,
+        temperature=temperature,
+        max_tokens=args.max_tokens,
+        taxonomy=taxonomy,
+        max_proposed_types=max_proposed,
+        target_drop_count=target_drop_count,
+        review_limit=max(target_drop_count, int(args.proposal_capacity_review_limit or 0)),
+    )
+    counters["capacity_prune_runs"] += 1
+    discarded = drop_proposals_by_ids(taxonomy, drop_items)
+    if discarded:
+        print(
+            "[general-mistakes] capacity prune discarded "
+            f"{len(discarded)} proposed types ({len(taxonomy.get('proposed_types', []))}/{max_proposed} remain)"
+        )
+    return discarded
 
 
 def append_run_log(path: Path, question_id: int, status: str, **extra: Any) -> None:

@@ -12,14 +12,19 @@ SEED_FAMILIES: Dict[str, str] = {
         "Mistakes in predicates, aggregation, ordering, time filters, numeric "
         "computation, boolean logic, or NULL handling."
     ),
-    "output_contract": (
+    "output_format": (
         "Mistakes in the shape of the returned answer: columns, rows, scalar vs "
         "rowset, pairing, ordering, or extra/missing fields."
     ),
-    "execution_strategy": (
-        "Mistakes in how the agent explores, validates, probes, simplifies, or "
-        "overcomplicates SQL during generation."
-    ),
+}
+
+
+DEFAULT_FAMILY = "sql_logic"
+
+
+FAMILY_ALIASES: Dict[str, str] = {
+    "output_contract": "output_format",
+    "execution_strategy": "sql_logic",
 }
 
 
@@ -42,4 +47,3 @@ EVAL_SQL_KEY = "go" + "ld_sql"
 EVAL_COLUMNS_KEY = "go" + "ld_columns"
 EVAL_ROWS_KEY = "go" + "ld_rows_preview"
 EVAL_ROW_COUNT_KEY = "go" + "ld_row_count"
-
