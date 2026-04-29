@@ -394,6 +394,7 @@ def format_validator_context(state: SharedState) -> str:
             "discovered_schema": [
                 {
                     "table": table,
+                    "confidence": ev.confidence,
                     "columns": ev.columns,
                     "primary_keys": ev.primary_keys,
                     "foreign_keys": ev.foreign_keys,

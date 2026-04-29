@@ -30,9 +30,10 @@ class WorkflowStatus(str, Enum):
 @dataclass
 class TableEvidence:
     table: str
-    columns: List[Dict[str, str]] = field(default_factory=list)
+    columns: List[Dict[str, Any]] = field(default_factory=list)
     primary_keys: List[str] = field(default_factory=list)
-    foreign_keys: List[Dict[str, str]] = field(default_factory=list)
+    foreign_keys: List[Dict[str, Any]] = field(default_factory=list)
+    confidence: float = 1.0
 
 
 @dataclass

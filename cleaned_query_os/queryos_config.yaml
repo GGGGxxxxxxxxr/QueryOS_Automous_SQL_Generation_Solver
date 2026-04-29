@@ -34,6 +34,9 @@ schema_discovery:
   max_tokens: 8192
   max_turns: 16
   max_tool_calls_per_turn: 8
+  # >1 enables parallel SDA workers. Schemas are merged by union and annotated
+  # with numeric confidence from worker agreement.
+  parallel_workers: 2
 
   # Actual READ_TABLE_JSON payload sent to SDA.
   # 0 means no column cap.

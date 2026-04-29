@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 from .llm import create_chat_completion, create_llm_backend, is_fatal_llm_error, safe_llm_error
 from .metadata import SchemaMetadataStore, normalize_name, parse_foreign_key
 from .prompts import build_schema_discovery_system_prompt
-from .state import AgentName, AgentReturn, SharedState, TableEvidence
+from .state import AgentName, AgentReturn, DiscoveredSchema, SharedState, TableEvidence
 from .tracing import EventTracer, NULL_TRACER
 
 logger = logging.getLogger(__name__)
@@ -209,6 +211,7 @@ class SchemaDiscoveryAgent:
         max_tool_calls_per_turn: int = 4,
         read_table_summary_max_cols: int = 30,
         trace_column_preview_limit: int = 8,
+        parallel_workers: int = 1,
         debug: bool = False,
         tracer: Optional[EventTracer] = None,
         llm_client: Optional[Any] = None,
@@ -221,14 +224,28 @@ class SchemaDiscoveryAgent:
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self.read_table_summary_max_cols = read_table_summary_max_cols
         self.trace_column_preview_limit = trace_column_preview_limit
+        self.parallel_workers = max(1, int(parallel_workers or 1))
         self.debug = debug
         self.tracer = tracer or NULL_TRACER
 
     def run(self, state: SharedState, guidance: str, metadata: SchemaMetadataStore) -> AgentReturn:
+        if self.parallel_workers > 1:
+            return self._run_parallel_group(state, guidance, metadata)
+        return self._run_single_worker(state, guidance, metadata, agent_label="SDA")
+
+    def _run_single_worker(
+        self,
+        state: SharedState,
+        guidance: str,
+        metadata: SchemaMetadataStore,
+        *,
+        agent_label: str,
+        worker_identity: str = "",
+    ) -> AgentReturn:
         global_step = state.step + 1
         self.tracer.emit(
             "worker_start",
-            "SDA",
+            agent_label,
             "Schema discovery worker started.",
             global_step=global_step,
             payload={"guidance": guidance},
@@ -244,6 +261,7 @@ class SchemaDiscoveryAgent:
             {
                 "role": "user",
                 "content": (
+                    (f"WORKER IDENTITY:\n{worker_identity}\n\n" if worker_identity else "") +
                     f"USER QUESTION:\n{state.question}\n\n"
                     f"EXTERNAL KNOWLEDGE:\n{state.external_knowledge}\n\n"
                     f"MANAGER GUIDANCE:\n{guidance}\n\n"
@@ -257,7 +275,7 @@ class SchemaDiscoveryAgent:
         for turn in range(1, self.max_turns + 1):
             self.tracer.emit(
                 "worker_step_start",
-                "SDA",
+                agent_label,
                 "Requesting schema-discovery tool call from LLM.",
                 global_step=global_step,
                 worker_step=turn,
@@ -268,7 +286,7 @@ class SchemaDiscoveryAgent:
                 last_error = f"SDA LLM call failed: {safe_llm_error(exc)}"
                 self.tracer.emit(
                     "worker_error",
-                    "SDA",
+                    agent_label,
                     last_error,
                     global_step=global_step,
                     worker_step=turn,
@@ -277,7 +295,7 @@ class SchemaDiscoveryAgent:
                 )
                 self.tracer.emit(
                     "worker_finish",
-                    "SDA",
+                    agent_label,
                     "Schema discovery stopped because the LLM call failed.",
                     global_step=global_step,
                     worker_step=turn,
@@ -296,7 +314,7 @@ class SchemaDiscoveryAgent:
                 logger.warning("[SDA] turn %s produced no tool call", turn)
                 self.tracer.emit(
                     "worker_error",
-                    "SDA",
+                    agent_label,
                     last_error,
                     global_step=global_step,
                     worker_step=turn,
@@ -318,7 +336,7 @@ class SchemaDiscoveryAgent:
 
             self.tracer.emit(
                 "worker_step_tools",
-                "SDA",
+                agent_label,
                 f"LLM emitted {len(unique_calls[: self.max_tool_calls_per_turn])} schema tool call(s).",
                 global_step=global_step,
                 worker_step=turn,
@@ -351,7 +369,7 @@ class SchemaDiscoveryAgent:
 
                 self.tracer.emit(
                     "tool_result",
-                    "SDA",
+                    agent_label,
                     f"Executed {name}.",
                     global_step=global_step,
                     worker_step=turn,
@@ -380,7 +398,7 @@ class SchemaDiscoveryAgent:
                     report = str(output.get("report") or "schema discovery finished")
                     self.tracer.emit(
                         "worker_finish",
-                        "SDA",
+                        agent_label,
                         "Schema discovery worker finished.",
                         global_step=global_step,
                         worker_step=turn,
@@ -406,7 +424,7 @@ class SchemaDiscoveryAgent:
         if state.discovered.tables:
             self.tracer.emit(
                 "worker_finish",
-                "SDA",
+                agent_label,
                 "Schema discovery reached max_turns with partial schema.",
                 global_step=global_step,
                 status="ok",
@@ -420,7 +438,7 @@ class SchemaDiscoveryAgent:
             )
         self.tracer.emit(
             "worker_finish",
-            "SDA",
+            agent_label,
             "Schema discovery failed.",
             global_step=global_step,
             status="error",
@@ -432,6 +450,112 @@ class SchemaDiscoveryAgent:
             report=last_error or "Schema discovery did not finish within max_turns.",
             payload={},
         )
+
+    def _run_parallel_group(self, state: SharedState, guidance: str, metadata: SchemaMetadataStore) -> AgentReturn:
+        global_step = state.step + 1
+        worker_ids = [f"schema_{idx}" for idx in range(1, self.parallel_workers + 1)]
+        self.tracer.emit(
+            "schema_group_start",
+            "SDA",
+            "Schema discovery group started.",
+            global_step=global_step,
+            payload={"workers": worker_ids, "guidance": guidance},
+        )
+
+        worker_results: Dict[str, Tuple[AgentReturn, SharedState]] = {}
+        with ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
+            futures = {
+                pool.submit(self._run_parallel_worker, state, guidance, metadata, worker_id): worker_id
+                for worker_id in worker_ids
+            }
+            for future in as_completed(futures):
+                worker_id = futures[future]
+                try:
+                    worker_results[worker_id] = future.result()
+                except Exception as exc:
+                    err = f"{worker_id} failed unexpectedly: {safe_llm_error(exc)}"
+                    worker_results[worker_id] = (
+                        AgentReturn(
+                            agent=AgentName.SCHEMA_DISCOVERY,
+                            ok=False,
+                            report=err,
+                            payload={"reason": "schema_worker_exception", "fatal": is_fatal_llm_error(exc)},
+                        ),
+                        fork_shared_state_for_schema(state),
+                    )
+
+        ordered_results = [worker_results[worker_id] for worker_id in worker_ids]
+        worker_states = [worker_state for _, worker_state in ordered_results]
+        if not any(worker_state.discovered.tables for worker_state in worker_states):
+            report = "Parallel schema discovery produced no discovered schema."
+            self.tracer.emit(
+                "schema_group_merge",
+                "SDA",
+                report,
+                global_step=global_step,
+                status="error",
+                payload={"workers": schema_worker_summaries(worker_ids, ordered_results), "tables": 0},
+            )
+            return AgentReturn(
+                agent=AgentName.SCHEMA_DISCOVERY,
+                ok=False,
+                report=report,
+                payload={
+                    "reason": "schema_group_empty",
+                    "fatal": any(ret.payload.get("fatal") for ret, _ in ordered_results),
+                    "workers": schema_worker_summaries(worker_ids, ordered_results),
+                },
+            )
+
+        state.discovered = merge_schema_worker_states(worker_states, metadata, worker_count=self.parallel_workers)
+        table_count = len(state.discovered.tables)
+        column_count = sum(len(ev.columns) for ev in state.discovered.tables.values())
+        report = (
+            "Parallel schema discovery merged worker schemas with numeric confidence "
+            "from worker agreement."
+        )
+        self.tracer.emit(
+            "schema_group_merge",
+            "SDA",
+            "Merged parallel schema discovery results.",
+            global_step=global_step,
+            status="ok",
+            payload={
+                "workers": schema_worker_summaries(worker_ids, ordered_results),
+                "tables": table_count,
+                "columns": column_count,
+            },
+        )
+        return AgentReturn(
+            agent=AgentName.SCHEMA_DISCOVERY,
+            ok=True,
+            report=report,
+            payload={
+                "discovered_schema": state.discovered.tables,
+                "workers": schema_worker_summaries(worker_ids, ordered_results),
+            },
+        )
+
+    def _run_parallel_worker(
+        self,
+        state: SharedState,
+        guidance: str,
+        metadata: SchemaMetadataStore,
+        worker_id: str,
+    ) -> Tuple[AgentReturn, SharedState]:
+        worker_state = fork_shared_state_for_schema(state)
+        ret = self._run_single_worker(
+            worker_state,
+            guidance,
+            metadata,
+            agent_label=f"SDA-{worker_id}",
+            worker_identity=(
+                f"You are {worker_id} in a parallel schema discovery group. "
+                "Work independently on your forked state. The kernel will merge all "
+                "workers' discovered schemas by union and compute confidence from agreement count."
+            ),
+        )
+        return ret, worker_state
 
     def _call_llm(self, messages: List[Dict[str, Any]]) -> Any:
         response = create_chat_completion(
@@ -617,6 +741,7 @@ def format_discovered_schema_compact(state: SharedState) -> str:
         payload.append(
             {
                 "table": table,
+                "confidence": ev.confidence,
                 "columns": ev.columns,
                 "primary_keys": ev.primary_keys,
                 "foreign_keys": ev.foreign_keys,
@@ -625,7 +750,7 @@ def format_discovered_schema_compact(state: SharedState) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def clean_columns(columns: List[Any]) -> List[Dict[str, str]]:
+def clean_columns(columns: List[Any]) -> List[Dict[str, Any]]:
     out = []
     for col in columns:
         if not isinstance(col, dict):
@@ -644,7 +769,8 @@ def hydrate_columns_from_metadata(
     table: str,
     columns: List[Any],
     metadata: SchemaMetadataStore,
-) -> List[Dict[str, str]]:
+    confidence: float = 1.0,
+) -> List[Dict[str, Any]]:
     """Return canonical column entries enriched with metadata type/description.
 
     The LLM only needs to identify the column name. Once verified, QueryOS uses
@@ -657,7 +783,7 @@ def hydrate_columns_from_metadata(
         for col in table_obj.get("columns", []) or []
         if isinstance(col, dict) and col.get("name")
     }
-    hydrated: List[Dict[str, str]] = []
+    hydrated: List[Dict[str, Any]] = []
     for col in clean_columns(columns):
         key = normalize_name(str(col.get("name", "")))
         meta_col = metadata_columns.get(key) or {}
@@ -671,36 +797,179 @@ def hydrate_columns_from_metadata(
         desc = str(meta_col.get("desc") or meta_col.get("description") or col.get("desc") or "").strip()
         if desc:
             item["desc"] = desc
+        item["confidence"] = float(confidence)
         hydrated.append(item)
     return hydrated
 
 
-def clean_foreign_keys(foreign_keys: List[Any]) -> List[Dict[str, str]]:
+def clean_foreign_keys(foreign_keys: List[Any]) -> List[Dict[str, Any]]:
     out = []
     for fk in foreign_keys:
         if not isinstance(fk, dict):
             continue
         col, ref_table, ref_column = parse_foreign_key(fk, strict=False)
         if col and ref_table and ref_column:
-            out.append({"col": col, "ref": f"{ref_table}.{ref_column}"})
+            out.append(
+                {
+                    "col": col,
+                    "ref": f"{ref_table}.{ref_column}",
+                    "confidence": 1.0,
+                }
+            )
     return out
 
 
-def add_or_replace_columns(ev: TableEvidence, columns: List[Dict[str, str]]) -> None:
+def merge_schema_worker_states(
+    worker_states: List[SharedState],
+    metadata: SchemaMetadataStore,
+    worker_count: int,
+) -> DiscoveredSchema:
+    total = max(1, int(worker_count or len(worker_states) or 1))
+    table_records: Dict[str, Dict[str, Any]] = {}
+    for worker_idx, worker_state in enumerate(worker_states, start=1):
+        seen_tables = set()
+        for table, ev in worker_state.discovered.tables.items():
+            table_key = normalize_name(table)
+            if not table_key:
+                continue
+            rec = table_records.setdefault(
+                table_key,
+                {
+                    "table": table,
+                    "table_support": set(),
+                    "columns": {},
+                    "primary_keys": {},
+                    "foreign_keys": {},
+                },
+            )
+            if table_key not in seen_tables:
+                rec["table_support"].add(worker_idx)
+                seen_tables.add(table_key)
+
+            seen_columns = set()
+            for col in ev.columns:
+                if not isinstance(col, dict) or not col.get("name"):
+                    continue
+                col_key = normalize_name(str(col.get("name")))
+                if not col_key or col_key in seen_columns:
+                    continue
+                seen_columns.add(col_key)
+                col_rec = rec["columns"].setdefault(col_key, {"column": dict(col), "support": set()})
+                col_rec["support"].add(worker_idx)
+
+            seen_pks = set()
+            for pk in ev.primary_keys:
+                pk_name = str(pk).strip()
+                pk_key = normalize_name(pk_name)
+                if not pk_key or pk_key in seen_pks:
+                    continue
+                seen_pks.add(pk_key)
+                pk_rec = rec["primary_keys"].setdefault(pk_key, {"name": pk_name, "support": set()})
+                pk_rec["support"].add(worker_idx)
+
+            seen_fks = set()
+            for fk in clean_foreign_keys(ev.foreign_keys):
+                fk_key = f'{normalize_name(fk.get("col", ""))}->{normalize_name(fk.get("ref", ""))}'
+                if "->" == fk_key or fk_key in seen_fks:
+                    continue
+                seen_fks.add(fk_key)
+                fk_rec = rec["foreign_keys"].setdefault(fk_key, {"foreign_key": dict(fk), "support": set()})
+                fk_rec["support"].add(worker_idx)
+
+    merged = DiscoveredSchema()
+    for _, rec in sorted(table_records.items(), key=lambda item: item[1]["table"]):
+        table = rec["table"]
+        table_support = len(rec["table_support"])
+        ev = TableEvidence(
+            table=table,
+            confidence=agreement_confidence(table_support, total),
+        )
+        columns = []
+        for _, col_rec in sorted(
+            rec["columns"].items(),
+            key=lambda item: str(item[1]["column"].get("name", "")).lower(),
+        ):
+            support = len(col_rec["support"])
+            confidence = agreement_confidence(support, total)
+            hydrated = hydrate_columns_from_metadata(table, [col_rec["column"]], metadata, confidence=confidence)
+            column = hydrated[0] if hydrated else dict(col_rec["column"])
+            column["confidence"] = confidence
+            columns.append(column)
+        ev.columns = columns
+
+        ev.primary_keys = [
+            pk_rec["name"]
+            for _, pk_rec in sorted(rec["primary_keys"].items(), key=lambda item: str(item[1]["name"]).lower())
+        ]
+
+        foreign_keys = []
+        for _, fk_rec in sorted(
+            rec["foreign_keys"].items(),
+            key=lambda item: f'{item[1]["foreign_key"].get("col", "")}->{item[1]["foreign_key"].get("ref", "")}'.lower(),
+        ):
+            support = len(fk_rec["support"])
+            fk = dict(fk_rec["foreign_key"])
+            fk["confidence"] = agreement_confidence(support, total)
+            foreign_keys.append(fk)
+        ev.foreign_keys = foreign_keys
+        merged.tables[table] = ev
+    return merged
+
+
+def agreement_confidence(agreement_count: int, worker_count: int) -> float:
+    return round(float(agreement_count) / float(max(1, worker_count)), 4)
+
+
+def fork_shared_state_for_schema(state: SharedState) -> SharedState:
+    return SharedState(
+        question=state.question,
+        db_path=state.db_path,
+        db_id=state.db_id,
+        external_knowledge=state.external_knowledge,
+        metadata_display=state.metadata_display,
+        workflow_status=state.workflow_status,
+        discovered=copy.deepcopy(state.discovered),
+        sql_attempts=list(state.sql_attempts),
+        validation_attempts=list(state.validation_attempts),
+        planner_trace=list(state.planner_trace),
+        step=state.step,
+        max_steps=state.max_steps,
+    )
+
+
+def schema_worker_summaries(
+    worker_ids: List[str],
+    ordered_results: List[Tuple[AgentReturn, SharedState]],
+) -> List[Dict[str, Any]]:
+    summaries = []
+    for worker_id, (ret, worker_state) in zip(worker_ids, ordered_results):
+        summaries.append(
+            {
+                "worker": worker_id,
+                "ok": ret.ok,
+                "table_count": len(worker_state.discovered.tables),
+                "column_count": sum(len(ev.columns) for ev in worker_state.discovered.tables.values()),
+                "report": ret.report,
+            }
+        )
+    return summaries
+
+
+def add_or_replace_columns(ev: TableEvidence, columns: List[Dict[str, Any]]) -> None:
     merged = {c.get("name", "").strip().lower(): c for c in ev.columns if c.get("name")}
     for col in columns:
         merged[col["name"].strip().lower()] = col
     ev.columns = list(merged.values())
 
 
-def add_or_replace_foreign_keys(ev: TableEvidence, foreign_keys: List[Dict[str, str]]) -> None:
+def add_or_replace_foreign_keys(ev: TableEvidence, foreign_keys: List[Dict[str, Any]]) -> None:
     merged = {f'{fk.get("col", "").lower()}->{fk.get("ref", "").lower()}': fk for fk in ev.foreign_keys}
     for fk in foreign_keys:
         merged[f'{fk.get("col", "").lower()}->{fk.get("ref", "").lower()}'] = fk
     ev.foreign_keys = list(merged.values())
 
 
-def remove_foreign_keys_from_table(ev: TableEvidence, foreign_keys: List[Dict[str, str]]) -> None:
+def remove_foreign_keys_from_table(ev: TableEvidence, foreign_keys: List[Dict[str, Any]]) -> None:
     if not foreign_keys:
         return
     remove = {f'{fk.get("col", "").lower()}->{fk.get("ref", "").lower()}' for fk in foreign_keys}

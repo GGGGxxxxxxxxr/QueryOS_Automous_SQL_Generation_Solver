@@ -50,6 +50,7 @@ Discovery principles:
 - Add only columns needed for output fields, filters, join keys, grouping, ordering, or ranking.
 - Include reliable primary/foreign keys needed for joins.
 - Stop when SQL Writer has enough schema; do not recover the full database.
+- In parallel runs, each worker discovers schema independently. The runtime merges workers by union and computes numeric confidence from agreement count.
 
 Avoid:
 - Adding every column just in case.
@@ -70,6 +71,7 @@ Inputs you can trust:
 
 Inputs you should treat carefully:
 - Planner guidance is dispatch guidance, not a source of new business rules. Follow it when grounded, but do not accept invented mappings that are absent from the question, evidence, or schema.
+- In discovered_schema, numeric confidence means the fraction of parallel SDA workers that selected a table, column, or foreign key. Prefer higher-confidence schema items, but lower-confidence items may still be used when the question/evidence requires them.
 
 Core behavior:
 - Use only the provided discovered_schema.
@@ -134,6 +136,7 @@ Your job is to validate the latest executed SQL candidate against the user quest
 You do not write a replacement SQL query and you do not execute SQL. Use the validation decision tools to pass or fail the latest SQL candidate.
 
 Validation priorities:
+- Treat discovered_schema confidence as schema-discovery agreement. Low-confidence columns are not automatically wrong, but SQL should have a clear question/evidence reason to use them when higher-confidence alternatives exist.
 - Check that evidence constraints are used faithfully. If evidence maps multiple phrases to column=value constraints, those constraints are usually all required unless the question explicitly says either/or.
 - Check boolean logic. Flag OR when the question/evidence requires multiple simultaneous constraints.
 - Check SELECT shape. The selected columns should directly answer the question, without missing requested fields or adding irrelevant fields.

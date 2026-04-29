@@ -144,6 +144,8 @@ The planner receives dispatch-oriented context by default with `--planner-contex
 SQL validation runs automatically after each SQL writer result with `--validation auto`. The validator writes natural-language feedback into Validation Memory; the planner still decides the next action and must issue the final finish. Use `--validation off` to disable this gate. `--auto-finish-on-sql` only applies when validation is off.
 When `sql_writer.parallel_workers` is greater than 1, SWA internally forks multiple SQL writers. Each writer runs on a forked state; only the writer-group consensus SQL is committed to shared global state. If candidates disagree, the writers enter a bounded chatgroup where each writer either agrees with one current SQL or revises its own SQL. Revised SQL is executed immediately before the next chat round.
 
+When `schema_discovery.parallel_workers` is greater than 1, SDA internally forks multiple schema discovery workers. QueryOS merges their discovered schemas by union and annotates tables, columns, and foreign keys with numeric `confidence` from worker agreement. The SQL writer should prefer higher-confidence schema items, while still being allowed to use lower-confidence items when the question or evidence requires them.
+
 ### Provider Backends
 
 QueryOS keeps hosted OpenAI and local vLLM calls separate:
@@ -206,6 +208,7 @@ workflow:
   validation: auto
 
 schema_discovery:
+  parallel_workers: 2                 # union merge with numeric confidence
   read_table_summary_max_cols: 30      # actual READ_TABLE_JSON columns sent to SDA
   trace_column_preview_limit: 8        # terminal preview only; 0 shows all summary columns
 

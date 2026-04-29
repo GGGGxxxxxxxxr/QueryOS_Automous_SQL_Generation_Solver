@@ -148,6 +148,7 @@ def _table_snapshot(ev: TableEvidence) -> Dict[str, Any]:
     columns = [dict(col) for col in ev.columns]
     return {
         "table": ev.table,
+        "confidence": ev.confidence,
         "columns": columns,
         "column_names": [str(col.get("name", "")) for col in columns if col.get("name")],
         "primary_keys": list(ev.primary_keys),

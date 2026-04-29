@@ -369,6 +369,7 @@ class QueryOS:
         schema_max_tool_calls_per_turn: int = 4,
         schema_read_table_summary_max_cols: int = 30,
         schema_trace_column_preview_limit: int = 8,
+        schema_parallel_workers: int = 1,
         sql_max_tokens: int = 4096,
         sql_max_turns: int = 8,
         sql_parallel_workers: int = 1,
@@ -411,6 +412,7 @@ class QueryOS:
         self.schema_max_tool_calls_per_turn = schema_max_tool_calls_per_turn
         self.schema_read_table_summary_max_cols = schema_read_table_summary_max_cols
         self.schema_trace_column_preview_limit = schema_trace_column_preview_limit
+        self.schema_parallel_workers = max(1, int(schema_parallel_workers or 1))
         self.sql_max_tokens = sql_max_tokens
         self.sql_max_turns = sql_max_turns
         self.sql_parallel_workers = max(1, int(sql_parallel_workers or 1))
@@ -511,6 +513,7 @@ class QueryOS:
                 max_tool_calls_per_turn=self.schema_max_tool_calls_per_turn,
                 read_table_summary_max_cols=self.schema_read_table_summary_max_cols,
                 trace_column_preview_limit=self.schema_trace_column_preview_limit,
+                parallel_workers=self.schema_parallel_workers,
                 debug=self.debug,
                 tracer=tracer,
                 llm_client=llm_backend,
@@ -824,6 +827,7 @@ def format_compact_state_for_planner(state: SharedState) -> str:
         discovered.append(
             {
                 "table": table,
+                "confidence": ev.confidence,
                 "columns": ev.columns,
                 "primary_keys": ev.primary_keys,
                 "foreign_keys": ev.foreign_keys,
@@ -886,6 +890,7 @@ def discovered_schema_for_planner(state: SharedState) -> List[Dict[str, Any]]:
     return [
         {
             "table": table,
+            "confidence": ev.confidence,
             "columns": ev.columns,
             "primary_keys": ev.primary_keys,
             "foreign_keys": ev.foreign_keys,

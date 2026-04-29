@@ -98,6 +98,7 @@ schema_discovery:
   max_tokens: 8192
   max_turns: 16
   max_tool_calls_per_turn: 8
+  parallel_workers: 2
   read_table_summary_max_cols: 0
   trace_column_preview_limit: 0
 

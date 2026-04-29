@@ -1089,6 +1089,7 @@ def format_discovered_schema(state: SharedState) -> str:
         payload.append(
             {
                 "table": table,
+                "confidence": ev.confidence,
                 "columns": ev.columns,
                 "primary_keys": ev.primary_keys,
                 "foreign_keys": ev.foreign_keys,

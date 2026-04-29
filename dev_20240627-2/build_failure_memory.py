@@ -88,6 +88,7 @@ def main() -> int:
     print(f"[failure-memory] results dir: {results_dir}")
     print(f"[failure-memory] output jsonl: {output_jsonl}")
     print(f"[failure-memory] outer workers: {max(1, args.workers)}")
+    print(f"[failure-memory] inner schema workers: {int(cfg_get(config, 'schema_discovery.parallel_workers', 1))}")
     print(f"[failure-memory] inner sql writers: {int(cfg_get(config, 'sql_writer.parallel_workers', 1))}")
     if args.live_trace and args.workers > 1:
         print("[failure-memory] warning: --live-trace with --workers > 1 can interleave terminal logs")
@@ -178,6 +179,7 @@ def build_queryos_agent(args: argparse.Namespace, config: Dict[str, Any]) -> Que
         schema_max_tool_calls_per_turn=int(cfg_get(config, "schema_discovery.max_tool_calls_per_turn", 4)),
         schema_read_table_summary_max_cols=int(cfg_get(config, "schema_discovery.read_table_summary_max_cols", 30)),
         schema_trace_column_preview_limit=int(cfg_get(config, "schema_discovery.trace_column_preview_limit", 8)),
+        schema_parallel_workers=int(cfg_get(config, "schema_discovery.parallel_workers", 1)),
         sql_max_tokens=int(cfg_get(config, "sql_writer.max_tokens", 4096)),
         sql_max_turns=int(cfg_get(config, "sql_writer.max_turns", 8)),
         sql_parallel_workers=int(cfg_get(config, "sql_writer.parallel_workers", 1)),

@@ -201,6 +201,31 @@ class EventTracer:
                 lines.append(f"    {self._color('task', 'yellow')}: {guidance}")
             return "\n".join(lines)
 
+        if event_type == "schema_group_start":
+            workers = payload.get("workers") or []
+            raw_guidance = str(payload.get("guidance") or "")
+            guidance = self._shorten(raw_guidance, 180)
+            lines = [self._color("  SDA schema group started", "cyan", bold=True)]
+            lines.append(f"    {self._color('workers', 'cyan')}: {', '.join(str(x) for x in workers)}")
+            if guidance and not self._repeats_planner_guidance(global_step, raw_guidance):
+                lines.append(f"    {self._color('task', 'yellow')}: {guidance}")
+            return "\n".join(lines)
+
+        if event_type == "schema_group_merge":
+            mark = "[OK]" if status == "ok" else "[ERR]"
+            color = "green" if status == "ok" else "red"
+            lines = [self._color(f"  {mark} SDA schema group merged", color, bold=True)]
+            if payload.get("tables") is not None:
+                lines.append(f"    {self._color('tables', 'cyan')}: {payload.get('tables')}")
+            if payload.get("columns") is not None:
+                lines.append(f"    {self._color('columns', 'cyan')}: {payload.get('columns')}")
+            for item in payload.get("workers") or []:
+                lines.append(
+                    f"    - {item.get('worker')}: ok={item.get('ok')} "
+                    f"tables={item.get('table_count')} columns={item.get('column_count')}"
+                )
+            return "\n".join(lines)
+
         if event_type == "writer_group_round":
             lines = [self._color(f"  SWA group chat round {worker_step}", "yellow", bold=True)]
             objective = str(payload.get("objective") or "")

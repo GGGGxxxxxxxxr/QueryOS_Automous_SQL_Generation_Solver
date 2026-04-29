@@ -120,6 +120,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         schema_max_tool_calls_per_turn=int(cfg_get(config, "schema_discovery.max_tool_calls_per_turn", 4)),
         schema_read_table_summary_max_cols=int(cfg_get(config, "schema_discovery.read_table_summary_max_cols", 30)),
         schema_trace_column_preview_limit=int(cfg_get(config, "schema_discovery.trace_column_preview_limit", 8)),
+        schema_parallel_workers=int(cfg_get(config, "schema_discovery.parallel_workers", 1)),
         sql_max_tokens=int(cfg_get(config, "sql_writer.max_tokens", 4096)),
         sql_max_turns=int(cfg_get(config, "sql_writer.max_turns", 8)),
         sql_parallel_workers=int(cfg_get(config, "sql_writer.parallel_workers", 1)),
