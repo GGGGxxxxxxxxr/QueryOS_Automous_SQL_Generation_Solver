@@ -36,33 +36,61 @@ QueryOS is built around a few core ideas:
 ## Workflow
 
 ```text
-Question + SQLite DB + metadata
+Question + SQLite DB + table metadata
         |
         v
-Manager / Planner
++------------------+
+| Manager/Planner  |  owns the global step loop and shared state
++------------------+
         |
-        +--> Schema Discovery Agent
-        |       - searches metadata
-        |       - reads table JSON
-        |       - introduces relevant tables, columns, keys
-        |       - optionally runs parallel SDA workers
+        |  CALL_SCHEMA_DISCOVERY
+        v
++------------------------- Schema Discovery Group -------------------------+
+| SDA-1 on forked state     SDA-2 on forked state     ... SDA-N            |
+| search/read/introduce     search/read/introduce         search/read       |
++-------------------------------------------------------------------------+
         |
-        +--> SQL Writer Agent
-        |       - writes exploratory SQL when useful
-        |       - executes read-only SQLite
-        |       - optionally runs parallel writer workers
-        |       - optionally resolves disagreement through writer chatgroup
+        |  union merge -> discovered schema + numeric confidence
+        v
++------------------+
+| Shared State     |  schema memory, SQL memory, validation memory, plan log
++------------------+
         |
-        +--> SQL Validator Agent
-        |       - checks SQL against question, evidence, schema, and result
-        |       - writes natural-language validation feedback
+        |  CALL_SQL_WRITER
+        v
++--------------------------- SQL Writer Group -----------------------------+
+| Writer-1 on forked state  Writer-2 on forked state  ... Writer-N         |
+| explore + execute SQL     explore + execute SQL         explore + execute |
+|                                                                         |
+| if results agree: commit consensus SQL                                  |
+| if results disagree: run bounded chatgroup                              |
++-------------------------------------------------------------------------+
+        |
+        |  commit one executable group candidate
+        v
++------------------+
+| Shared State     |  latest SQL attempt + result preview
++------------------+
+        |
+        |  VALIDATION_GATE
+        v
++------------------------- SQL Validator Agent ----------------------------+
+| checks question/evidence/schema/result and writes natural-language       |
+| feedback into validation memory                                          |
++-------------------------------------------------------------------------+
         |
         v
-Planner finish decision
++------------------+
+| Manager/Planner  |  decides retry, call another worker, or FINISH
++------------------+
         |
         v
 Result + trace JSON + optional golden SQL comparison
 ```
+
+The important detail is that parallelism is internal to a worker group. The
+manager still sees a clean global state transition: dispatch a logical worker,
+merge or commit the group output, validate, then decide the next global action.
 
 ## Parallel Workers
 
@@ -104,10 +132,64 @@ Interpretation:
 When `sql_writer.parallel_workers > 1`, QueryOS forks multiple SQL writers.
 Each writer gets the same shared state snapshot and produces its own SQL attempt.
 
-If the writers agree, the consensus SQL is committed to global state. If they
-disagree, the writer chatgroup can run a bounded discussion round where each
-writer either agrees with an existing SQL or revises its own SQL. Revised SQL is
-executed immediately before the next round.
+The writer group uses a conservative consensus protocol:
+
+```text
+Manager guidance + shared state
+        |
+        v
+fork Writer-1 ... Writer-N
+        |
+        v
+each writer explores, executes SQL, and reports a candidate
+        |
+        +--> no executable candidates
+        |       return divergence to manager
+        |
+        +--> exactly one executable candidate
+        |       commit that candidate
+        |
+        +--> all executable candidates return the same result signature
+        |       commit result consensus
+        |
+        v
+bounded writer chatgroup
+        |
+        +--> AGREE(target_worker)
+        |       worker accepts another worker's current SQL
+        |
+        +--> REVISE(sql)
+        |       worker replaces its own SQL; QueryOS executes it immediately
+        |
+        v
+if every writer agrees on the same target: commit agreement consensus
+else if final result signatures match: commit result consensus
+else: return divergence to manager
+```
+
+The chatgroup is deliberately not a free-form debate transcript. Each worker
+must take one concrete action:
+
+- `AGREE(target_worker)`: choose one current SQL candidate as the group answer.
+- `REVISE(sql)`: replace its own candidate with a new read-only SQLite query.
+
+This gives QueryOS a clean synchronization point. A revised SQL is not trusted
+because it sounds plausible; it is executed immediately, stored as that worker's
+new candidate, and only then can the group agree on it.
+
+The group commits a SQL only under one of these conditions:
+
+- **Single viable candidate**: only one worker produced executable SQL.
+- **Result consensus**: all viable workers produced the same execution result
+  signature.
+- **Agreement consensus**: after chat, every worker agreed on the same target
+  worker's current executable SQL.
+- **Post-chat result consensus**: the writers did not unanimously agree, but
+  their final executable results are consistent.
+
+If none of those conditions holds, QueryOS does not silently pick a winner. The
+writer group reports divergence back to the manager, and the planner can decide
+whether to retry, ask for more schema, or change strategy.
 
 ## Repository Layout
 
