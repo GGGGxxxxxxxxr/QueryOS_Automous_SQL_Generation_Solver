@@ -48,7 +48,7 @@ Question + SQLite DB + table metadata
         |
         |  every global step reads the current shared state
         |
-+----------------------------- Manager / Planner --------------------------+
++----------------------------- Manager / Planner -------------------------+
 | Chooses exactly one next action each step:                              |
 |                                                                         |
 |  CALL_SCHEMA_DISCOVERY  CALL_SQL_WRITER  PLANNER_FINISH                 |
