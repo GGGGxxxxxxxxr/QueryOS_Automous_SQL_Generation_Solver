@@ -89,6 +89,7 @@ class SharedState:
     db_path: str
     db_id: str = ""
     external_knowledge: str = ""
+    database_skills: str = ""
     metadata_display: str = ""
     workflow_status: WorkflowStatus = WorkflowStatus.NEED_SCHEMA
     discovered: DiscoveredSchema = field(default_factory=DiscoveredSchema)

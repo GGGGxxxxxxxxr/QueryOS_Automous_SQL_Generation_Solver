@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .llm import create_chat_completion, create_llm_backend, is_fatal_llm_error, safe_llm_error
 from .metadata import SchemaMetadataStore
+from .database_skills import load_database_skills
 from .prompts import build_planner_system_prompt
 from .schema_discovery_agent import SchemaDiscoveryAgent
 from .sql_writer import SQLWriterAgent
@@ -511,6 +512,7 @@ class QueryOS:
             db_path=db_path,
             db_id=db_id,
             external_knowledge=external_knowledge,
+            database_skills=load_database_skills(db_id),
             metadata_display=metadata.display(),
             max_steps=self.max_steps,
         )

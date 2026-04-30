@@ -427,6 +427,7 @@ def format_validator_context(state: SharedState) -> str:
         {
             "question": state.question,
             "external_knowledge": state.external_knowledge,
+            "database_skills": state.database_skills,
             "workflow_status": state.workflow_status.value,
             "context_policy": (
                 "Only submission_SQL is eligible for validation and final presentation. "
