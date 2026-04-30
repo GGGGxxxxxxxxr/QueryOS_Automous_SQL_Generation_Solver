@@ -11,7 +11,7 @@ from .metadata import SchemaMetadataStore
 from .database_skills import load_database_skills
 from .prompts import build_planner_system_prompt
 from .schema_discovery_agent import SchemaDiscoveryAgent
-from .sql_writer import SQLWriterAgent
+from .sql_writer import SQLWriterAgent, result_signature
 from .sql_validator import SQLValidatorAgent
 from .sqlite_executor import SQLiteExecutor
 from .state import (
@@ -314,7 +314,14 @@ class AgenticSystem:
                 and len(state.sql_attempts) > before_sql_attempt_count
                 and latest_successful_attempt(state)
             ):
-                validation_ret = self.sva.run(state) if self.sva else missing_validator_return(state)
+                validation_ret = maybe_accept_stable_submission(
+                    state,
+                    before_sql_attempt_count=before_sql_attempt_count,
+                    tracer=self.tracer,
+                    global_step=global_step,
+                )
+                if validation_ret is None:
+                    validation_ret = self.sva.run(state) if self.sva else missing_validator_return(state)
             state.step += 1
             state_delta_payload = diff_state(
                 before_state,
@@ -871,6 +878,74 @@ def missing_validator_return(state: SharedState) -> AgentReturn:
     )
 
 
+def maybe_accept_stable_submission(
+    state: SharedState,
+    *,
+    before_sql_attempt_count: int,
+    tracer: EventTracer,
+    global_step: int,
+) -> Optional[AgentReturn]:
+    previous = latest_successful_attempt_before(state, before_sql_attempt_count)
+    current = latest_successful_attempt_with_index(state)
+    if previous is None or current is None:
+        return None
+    previous_idx, previous_attempt = previous
+    current_idx, current_attempt = current
+    if current_idx <= before_sql_attempt_count:
+        return None
+    current_result = current_attempt.result or {}
+    if result_is_suspicious(current_result):
+        return None
+    previous_sig = result_signature(previous_attempt.result or {}, require_columns=False)
+    current_sig = result_signature(current_result, require_columns=False)
+    if not previous_sig or previous_sig != current_sig:
+        return None
+
+    report = (
+        "Manager skipped SQL Validator because two consecutive SQL writer submissions "
+        "returned the same execution result."
+    )
+    state.validation_attempts.append(
+        ValidationAttempt(
+            sql_attempt_idx=current_idx,
+            status="pass",
+            issues=[],
+            feedback=(
+                "The current submission_SQL matches the previous SQL writer submission result. "
+                "Treat this stable repeated result as accepted unless later evidence changes."
+            ),
+            report=report,
+            confidence="stable_repeated_submission_result",
+        )
+    )
+    state.workflow_status = WorkflowStatus.SQL_VALIDATED
+    tracer.emit(
+        "validation_skip",
+        "manager",
+        "Skipped SQL Validator for stable repeated submission_SQL result.",
+        global_step=global_step,
+        status="ok",
+        payload={
+            "reason": "stable_repeated_submission_result",
+            "previous_sql_attempt_idx": previous_idx,
+            "current_sql_attempt_idx": current_idx,
+            "signature": current_sig[:16],
+            "report": report,
+        },
+    )
+    return AgentReturn(
+        agent=AgentName.SQL_VALIDATOR,
+        ok=True,
+        report=report,
+        payload={
+            "validation_status": "pass",
+            "reason": "stable_repeated_submission_result",
+            "previous_sql_attempt_idx": previous_idx,
+            "current_sql_attempt_idx": current_idx,
+        },
+    )
+
+
 def fallback_planner_decision(state: SharedState) -> PlannerDecision:
     pending_worker = best_pending_submission_worker(state)
     if pending_worker:
@@ -1181,6 +1256,23 @@ def latest_successful_attempt(state: SharedState) -> Optional[Any]:
     for attempt in reversed(state.sql_attempts):
         if attempt.status == "executed_ok" and attempt.result and attempt.result.get("ok"):
             return attempt
+    return None
+
+
+def latest_successful_attempt_with_index(state: SharedState) -> Optional[tuple[int, SQLAttempt]]:
+    for idx in range(len(state.sql_attempts), 0, -1):
+        attempt = state.sql_attempts[idx - 1]
+        if attempt.status == "executed_ok" and attempt.result and attempt.result.get("ok"):
+            return idx, attempt
+    return None
+
+
+def latest_successful_attempt_before(state: SharedState, attempt_count: int) -> Optional[tuple[int, SQLAttempt]]:
+    upper = max(0, min(attempt_count, len(state.sql_attempts)))
+    for idx in range(upper, 0, -1):
+        attempt = state.sql_attempts[idx - 1]
+        if attempt.status == "executed_ok" and attempt.result and attempt.result.get("ok"):
+            return idx, attempt
     return None
 
 

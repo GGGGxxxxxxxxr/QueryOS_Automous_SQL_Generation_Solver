@@ -188,6 +188,25 @@ class EventTracer:
                 lines.append(f"  {self._color('sql attempt', 'yellow')}: #{sql_attempt_idx}")
             return "\n".join(lines)
 
+        if event_type == "validation_skip":
+            lines = [
+                "",
+                self._separator("cyan"),
+                self._color("VALIDATION GATE", "cyan", bold=True),
+                f"  {self._color('Manager', 'blue', bold=True)} -> {self._color('SQL Validator Agent', 'cyan', bold=True)}",
+                f"  {self._color('[SKIPPED]', 'yellow', bold=True)} stable repeated submission_SQL result",
+            ]
+            if payload.get("previous_sql_attempt_idx") and payload.get("current_sql_attempt_idx"):
+                lines.append(
+                    f"    previous/current: #{payload.get('previous_sql_attempt_idx')} -> "
+                    f"#{payload.get('current_sql_attempt_idx')}"
+                )
+            if payload.get("signature"):
+                lines.append(f"    signature: {payload.get('signature')}")
+            if payload.get("report"):
+                lines.append(f"    report: {payload.get('report')}")
+            return "\n".join(lines)
+
         if event_type == "worker_start":
             raw_guidance = str(payload.get("guidance") or "")
             guidance = self._shorten(raw_guidance, 160)
