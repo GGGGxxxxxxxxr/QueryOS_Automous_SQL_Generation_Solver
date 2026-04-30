@@ -495,10 +495,18 @@ class EventTracer:
             lines.append(f"{indent}{self._color('guidance', 'yellow')}: {payload.get('guidance')}")
         if payload.get("gold_match") is not None:
             lines.append(f"{indent}{self._color('gold match', 'green' if payload.get('gold_match') else 'red')}: {payload.get('gold_match')}")
+        if payload.get("comparison_mode"):
+            lines.append(f"{indent}comparison mode: {payload.get('comparison_mode')}")
         if payload.get("exact_match") is not None:
             lines.append(f"{indent}exact rows match: {payload.get('exact_match')}")
         if payload.get("unordered_match") is not None:
             lines.append(f"{indent}unordered rows match: {payload.get('unordered_match')}")
+        if payload.get("relaxed_match") is not None:
+            lines.append(f"{indent}relaxed match: {payload.get('relaxed_match')}")
+        if payload.get("relaxed_cluster"):
+            lines.append(f"{indent}{self._color('relaxed cluster', 'cyan')}: {payload.get('relaxed_cluster')}")
+        if payload.get("relaxed_reason"):
+            lines.append(f"{indent}{self._color('relaxed reason', 'cyan')}: {payload.get('relaxed_reason')}")
         if payload.get("predicted_preview"):
             lines.append(f"{indent}{self._color('predicted preview', 'cyan')}: {self._shorten(str(payload.get('predicted_preview')), 220)}")
         if payload.get("gold_preview"):

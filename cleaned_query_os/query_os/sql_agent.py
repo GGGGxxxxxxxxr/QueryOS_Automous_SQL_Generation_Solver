@@ -10,6 +10,7 @@ from .llm import create_chat_completion, create_llm_backend, is_fatal_llm_error,
 from .metadata import SchemaMetadataStore
 from .database_skills import load_database_skills
 from .prompts import build_planner_system_prompt
+from .result_compare import compare_sql_execution_results
 from .schema_discovery_agent import SchemaDiscoveryAgent
 from .sql_writer import SQLWriterAgent, result_signature
 from .sql_validator import SQLValidatorAgent
@@ -661,7 +662,7 @@ class QueryOS:
         }
         comparison = compare_sql_execution_results(predicted_result, gold_exec)
         result.gold_comparison = comparison
-        result.gold_match = bool(comparison.get("exact_rows_match") or comparison.get("unordered_rows_match"))
+        result.gold_match = bool(comparison.get("match"))
 
         tracer.emit(
             "gold_result",
@@ -675,8 +676,13 @@ class QueryOS:
                 "preview_rows": gold_preview,
                 "error": gold_exec.get("error", ""),
                 "gold_match": result.gold_match,
+                "comparison_mode": comparison.get("comparison_mode"),
                 "exact_match": comparison.get("exact_rows_match"),
                 "unordered_match": comparison.get("unordered_rows_match"),
+                "relaxed_match": comparison.get("relaxed_match"),
+                "relaxed_cluster": comparison.get("relaxed_cluster"),
+                "relaxed_reason": comparison.get("relaxed_reason"),
+                "projection": comparison.get("projection"),
                 "predicted_preview": predicted_preview,
                 "gold_preview": gold_preview,
             },
@@ -1290,32 +1296,6 @@ def result_suspicion_reasons(result: Dict[str, Any]) -> List[str]:
     if any(any(cell is None for cell in row) for row in rows):
         return ["result contains NULL values"]
     return []
-
-
-def compare_sql_execution_results(predicted: Dict[str, Any], gold: Dict[str, Any]) -> Dict[str, Any]:
-    pred_body = predicted.get("result") or {}
-    gold_body = gold.get("result") or {}
-    pred_rows = pred_body.get("rows") or []
-    gold_rows = gold_body.get("rows") or []
-    pred_norm = normalize_rows_for_compare(pred_rows)
-    gold_norm = normalize_rows_for_compare(gold_rows)
-    exact = pred_norm == gold_norm
-    unordered = sorted(pred_norm) == sorted(gold_norm)
-    return {
-        "predicted_ok": bool(predicted.get("ok")),
-        "gold_ok": bool(gold.get("ok")),
-        "exact_rows_match": bool(predicted.get("ok") and gold.get("ok") and exact),
-        "unordered_rows_match": bool(predicted.get("ok") and gold.get("ok") and unordered),
-        "predicted_row_count": len(pred_rows),
-        "gold_row_count": len(gold_rows),
-        "predicted_columns": pred_body.get("columns", []),
-        "gold_columns": gold_body.get("columns", []),
-        "gold_error": gold.get("error", ""),
-    }
-
-
-def normalize_rows_for_compare(rows: List[List[Any]]) -> List[str]:
-    return [json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) for row in rows]
 
 
 def result_to_dict(result: SQLGenerationResult) -> Dict[str, Any]:

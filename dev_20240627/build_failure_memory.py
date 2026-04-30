@@ -13,11 +13,14 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 CLEANED_QUERYOS_ROOT = REPO_ROOT / "cleaned_query_os"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 if str(CLEANED_QUERYOS_ROOT) not in sys.path:
     sys.path.insert(0, str(CLEANED_QUERYOS_ROOT))
 
 from query_os.config import cfg_get, load_yaml_config, pick  # noqa: E402
 from query_os.llm import create_chat_completion, create_llm_backend, safe_llm_error  # noqa: E402
+from query_os.result_compare import compare_sql_execution_results  # noqa: E402
 from query_os.sql_agent import QueryOS, result_to_dict  # noqa: E402
 from recheck_true_errors import recheck_record  # noqa: E402
 
@@ -272,6 +275,7 @@ def process_sample(
     try:
         if resume and result_path.exists() and not args.overwrite_results:
             result_doc = json.loads(result_path.read_text(encoding="utf-8"))
+            refresh_result_comparison(result_doc)
         else:
             agent = build_queryos_agent(args, config)
             db_path = find_sqlite_path(dataset_root, db_id)
@@ -287,6 +291,7 @@ def process_sample(
                 golden_sql=str(sample.get("SQL") or ""),
             )
             result_doc = result_to_dict(result)
+            refresh_result_comparison(result_doc)
             result_path.write_text(
                 json.dumps(result_doc, ensure_ascii=False, indent=2, default=str),
                 encoding="utf-8",
@@ -408,6 +413,23 @@ def update_counters(counters: Dict[str, int], status: str) -> None:
     elif status == "error_written":
         counters["written"] += 1
         counters["failed"] += 1
+
+
+def refresh_result_comparison(result_doc: Dict[str, Any]) -> None:
+    gold_result = result_doc.get("gold_result")
+    if not isinstance(gold_result, dict):
+        return
+    predicted_result = {
+        "ok": bool(result_doc.get("final_sql")),
+        "result": {
+            "columns": result_doc.get("columns") or [],
+            "rows": result_doc.get("rows") or [],
+        },
+        "error": "",
+    }
+    comparison = compare_sql_execution_results(predicted_result, gold_result)
+    result_doc["gold_comparison"] = comparison
+    result_doc["gold_match"] = bool(comparison.get("match"))
 
 
 def log(lock: threading.Lock, message: str) -> None:
