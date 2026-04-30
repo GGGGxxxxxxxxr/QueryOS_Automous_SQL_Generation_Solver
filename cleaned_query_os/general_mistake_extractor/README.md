@@ -55,7 +55,7 @@ python cleaned_query_os/general_mistake_extractor/build_general_mistakes.py \
   --limit 20 \
   --proposal-stale-after 50 \
   --max-proposed-types 100 \
-  --tuple-dedupe-threshold 8
+  --tuple-dedupe-threshold 1
 ```
 
 OpenAI example:
@@ -156,6 +156,9 @@ intra-type dedupe pass. When an active type has at least
 decides how many unique representative tuples should remain. This keeps raw
 learning fine-grained while keeping `general_mistake_set.json` readable. Use
 `--tuple-dedupe-threshold 0` to disable the final tuple pass.
+
+The default threshold is `1`, so the final pass also normalizes overly specific
+raw error text into short abstract labels.
 
 `--max-tuples-per-type` is optional. Its default is `0`, which means no hard
 cap. Set it only when you explicitly want a maximum output size.

@@ -140,9 +140,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tuple-dedupe-threshold",
         type=int,
-        default=8,
+        default=1,
         help=(
-            "Run final intra-type tuple dedupe when an active type has at least this many raw pattern tuples. "
+            "Run final intra-type tuple dedupe and label normalization when an active type has at least this many raw pattern tuples. "
             "Use 0 to disable."
         ),
     )

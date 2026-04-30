@@ -37,7 +37,7 @@ Return one JSON object with this exact shape:
   },
   "routing_decisions": [
     {
-      "error": "one short reusable error reason",
+      "error": "short abstract mistake label, 2-6 words",
       "typical_error_sql_shape": "abstract risky SQL skeleton or short behavior shape",
       "ideal_sql_shape": "abstract corrected SQL skeleton or short ideal rule",
       "routing": {
@@ -68,7 +68,7 @@ Return one JSON object with this exact shape:
 {
   "atomic_mistakes": [
     {
-      "error": "one short reusable error reason",
+      "error": "short abstract mistake label, 2-6 words",
       "typical_error_sql_shape": "abstract risky SQL skeleton or short behavior shape",
       "ideal_sql_shape": "abstract corrected SQL skeleton or short ideal rule",
       "proposed_family": "one top-level family id",
@@ -127,7 +127,7 @@ Return one JSON object with this exact shape:
 def build_tuple_dedupe_system_prompt() -> str:
     return COMMON_SYSTEM_PROMPT + """
 
-This is the final intra-type pattern deduplication stage.
+This is the final intra-type pattern deduplication and label-normalization stage.
 
 You are given one already-established general mistake type and many supporting pattern tuples under it.
 Each tuple has:
@@ -136,18 +136,20 @@ Each tuple has:
 - ideal_sql_shape
 
 Your job:
-- Merge near-duplicate tuples within this type.
+- Merge near-duplicate tuples within this type, including tuples whose `error` text is a narrow version of the same general mechanism.
 - Keep distinct sub-patterns when they represent materially different SQL failure shapes or repairs.
 - Preserve the type boundary; do not rename the type or create new types.
 - Return a compact list of representative tuple patterns.
 - The tuple must remain general. Do not include dataset details.
 - Prefer abstract SQL skeletons for both SQL shape fields.
+- Rewrite every returned `error` as a short abstract label. Do not preserve overly specific incoming error sentences.
+- Use the SQL shape fields, not the `error` field, to express details such as DISTINCT vs non-DISTINCT, missing predicates, or date comparison form.
 
 Return one JSON object with this exact shape:
 {
   "patterns": [
     {
-      "error": "short general error reason",
+      "error": "short abstract mistake label, 2-6 words",
       "typical_error_sql_shape": "abstract wrong SQL shape",
       "ideal_sql_shape": "abstract ideal SQL shape",
       "support_count": 1
@@ -176,10 +178,17 @@ Hard constraints:
 - Do not include parenthetical examples in reusable rule fields.
 - Prefer one precise mistake type over broad buckets that mix unrelated causes.
 - Prefer an existing near-match over creating a slightly more precise duplicate.
-- Focus on three reusable facts: error reason, typical error SQL pattern, and ideal SQL pattern.
+- Focus on three reusable facts: abstract error label, typical error SQL pattern, and ideal SQL pattern.
 - Keep all fields minimal. Do not produce long criteria lists.
 - When possible, express typical error shape as an abstract SQL skeleton.
 - Generalize the mistake mechanism, not the dataset detail.
+- The `error` field must be a compact abstract label, not a full diagnosis sentence.
+- The `error` field should usually be 2-6 words.
+- Do not put explanations, conditions, or sample context in `error`; put those in the SQL shape fields.
+- Avoid words such as "when", "where", "because", "due to", "instead of", and "semantically" in `error`.
+- Prefer labels like "missing_filter_predicate", "wrong_count_granularity", "row_multiplicity_loss", "wrong_grouping_level", "output_column_mismatch", "date_filter_mismatch", "wrong_join_scope", "wrong_denominator".
+- Prefer "row_multiplicity_loss" over "inappropriate DISTINCT in enumeration query where duplicates are semantically meaningful".
+- Prefer "wrong_count_granularity" over "using COUNT(DISTINCT) instead of COUNT(*) when all rows must be included".
 - Prefer "missing required WHERE predicate before aggregation" over "forgot to filter a specific school type".
 - Prefer "wrong grouping level" over "grouped by a specific district column".
 - Prefer "extra output column" over naming the concrete extra column.
