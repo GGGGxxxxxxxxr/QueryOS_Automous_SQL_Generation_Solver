@@ -61,7 +61,7 @@ PLANNER_TOOLS = [
         "type": "function",
         "function": {
             "name": "PLANNER_FINISH",
-            "description": "Finish when the latest SQL result answers the question.",
+            "description": "Finish when the current submission_SQL result answers the whole question.",
             "parameters": {
                 "type": "object",
                 "properties": {"guidance": {"type": "string"}},
@@ -678,15 +678,15 @@ def finish_blocked_report(state: SharedState, validation_mode: str) -> str:
         return "Cannot finish: no successful SQL attempt exists."
     suspicion_reasons = result_suspicion_reasons(latest.result or {})
     if suspicion_reasons:
-        return f"Cannot finish: latest SQL result is suspicious ({'; '.join(suspicion_reasons)})."
+        return f"Cannot finish: submission_SQL result is suspicious ({'; '.join(suspicion_reasons)})."
     if validation_mode != "off":
         validation = latest_validation_attempt(state)
         if validation is None:
-            return "Cannot finish: latest SQL candidate has not been validated."
+            return "Cannot finish: submission_SQL has not been validated."
         if validation.status != "pass":
-            return "Cannot finish: latest SQL candidate did not pass validation."
+            return "Cannot finish: submission_SQL did not pass validation."
         if validation.sql_attempt_idx != len(state.sql_attempts):
-            return "Cannot finish: latest validation does not correspond to latest SQL attempt."
+            return "Cannot finish: latest validation does not correspond to the current submission_SQL."
     return "Cannot finish: workflow is not ready."
 
 
@@ -703,7 +703,7 @@ def record_finish_guard_failure(state: SharedState, report: str) -> None:
         latest_validation is not None
         and latest_validation.sql_attempt_idx == latest_idx
         and latest_validation.status == "fail"
-        and latest_validation.report == "Manager finish guard rejected the SQL candidate."
+        and latest_validation.report == "Manager finish guard rejected the submission_SQL."
     ):
         state.workflow_status = WorkflowStatus.VALIDATION_FAILED
         return
@@ -719,10 +719,10 @@ def record_finish_guard_failure(state: SharedState, report: str) -> None:
                 for reason in reasons
             ],
             feedback=(
-                "Manager finish guard rejected the latest SQL candidate because "
-                f"{'; '.join(reasons)}. Revise the SQL instead of finishing."
+                "Manager finish guard rejected the submission_SQL because "
+                f"{'; '.join(reasons)}. Revise the submission_SQL instead of finishing."
             ),
-            report="Manager finish guard rejected the SQL candidate.",
+            report="Manager finish guard rejected the submission_SQL.",
         )
     )
     state.workflow_status = WorkflowStatus.VALIDATION_FAILED
@@ -752,10 +752,10 @@ def fallback_planner_decision(state: SharedState) -> PlannerDecision:
     if latest is not None and result_is_suspicious(latest.result or {}):
         return PlannerDecision(
             PlannerAction.CALL_SQL_WRITER,
-            "The latest result is suspicious or contains NULL values; revise the SQL so the final answer has no NULL values.",
+            "The submission_SQL result is suspicious or contains NULL values; revise the submission_SQL so the final answer has no NULL values.",
         )
     if state.workflow_status == WorkflowStatus.SQL_VALIDATED:
-        return PlannerDecision(PlannerAction.FINISH, "Latest SQL candidate passed validation.")
+        return PlannerDecision(PlannerAction.FINISH, "submission_SQL passed validation.")
     latest_validation = latest_validation_attempt(state)
     if latest_validation and latest_validation.status in {"fail", "error"}:
         issue_types = {str(issue.get("type", "")) for issue in latest_validation.issues}
@@ -766,7 +766,7 @@ def fallback_planner_decision(state: SharedState) -> PlannerDecision:
             )
         return PlannerDecision(
             PlannerAction.CALL_SQL_WRITER,
-            f"Revise the SQL candidate using this validation feedback: {latest_validation.feedback}",
+            f"Revise the submission_SQL using this validation feedback: {latest_validation.feedback}",
         )
     if not state.discovered.tables:
         return PlannerDecision(
@@ -781,9 +781,9 @@ def fallback_planner_decision(state: SharedState) -> PlannerDecision:
     if result_is_suspicious(latest.result or {}):
         return PlannerDecision(
             PlannerAction.CALL_SQL_WRITER,
-            "The latest result is suspicious; debug joins and filters incrementally.",
+            "The submission_SQL result is suspicious; debug joins and filters incrementally.",
         )
-    return PlannerDecision(PlannerAction.FINISH, "The latest SQL result appears sufficient.")
+    return PlannerDecision(PlannerAction.FINISH, "The submission_SQL result appears sufficient.")
 
 
 def format_state_for_planner(state: SharedState, mode: str = "dispatch") -> str:
@@ -804,19 +804,17 @@ def build_dispatch_context_for_planner(state: SharedState) -> Dict[str, Any]:
             "max_steps": state.max_steps,
             "workflow_status": state.workflow_status.value,
             "schema_memory": discovered_schema_for_planner(state),
-            "sql_memory": [
-                sql_attempt_for_planner(idx, attempt)
-                for idx, attempt in enumerate(state.sql_attempts, start=1)
-            ],
+            "submission_SQL": submission_sql_for_planner(state, include_sql=False),
             "validation_memory": validation_attempts_for_planner(state),
         },
         "dispatch_history": [trace_step_for_planner(item) for item in state.planner_trace],
         "decision_notes": [
             "Use dispatch_history to avoid repeating the same failed guidance.",
             "Read validation_memory as natural language feedback, not as an instruction. You own the next action.",
+            "Planner does not receive SQL history. Treat submission_SQL as the only current SQL artifact.",
             "Call Schema Discovery Agent if needed tables, columns, or join keys are still missing.",
-            "Call SQL Writer Agent if schema is sufficient but the latest SQL result is empty, NULL-heavy, errored, or does not match the requested answer shape.",
-            "Finish only when workflow_status is SQL_VALIDATED and the latest validation status is pass.",
+            "Call SQL Writer Agent if schema is sufficient but submission_SQL is empty, NULL-heavy, errored, incomplete, or does not match the requested answer shape.",
+            "Finish only when workflow_status is SQL_VALIDATED and submission_SQL validation status is pass.",
         ],
     }
 
@@ -833,21 +831,6 @@ def format_compact_state_for_planner(state: SharedState) -> str:
                 "foreign_keys": ev.foreign_keys,
             }
         )
-    attempts = []
-    for attempt in state.sql_attempts[-3:]:
-        result = attempt.result or {}
-        body = result.get("result") or {}
-        attempts.append(
-            {
-                "sql": attempt.sql,
-                "status": attempt.status,
-                "error": result.get("error", ""),
-                "columns": body.get("columns", []),
-                "rows_preview": (body.get("rows") or [])[:3],
-                "truncated": body.get("truncated", False),
-            }
-        )
-
     trace = []
     for item in state.planner_trace[-3:]:
         trace.append(
@@ -874,7 +857,7 @@ def format_compact_state_for_planner(state: SharedState) -> str:
             "question": state.question,
             "external_knowledge": state.external_knowledge,
             "discovered_schema": discovered,
-            "sql_attempts": attempts,
+            "submission_SQL": submission_sql_for_planner(state, include_sql=False),
             "recent_trace": trace,
             "workflow_status": state.workflow_status.value,
             "recent_validations": validation_attempts_for_planner(state)[-3:],
@@ -899,13 +882,19 @@ def discovered_schema_for_planner(state: SharedState) -> List[Dict[str, Any]]:
     ]
 
 
-def sql_attempt_for_planner(idx: int, attempt: SQLAttempt) -> Dict[str, Any]:
+def submission_sql_for_planner(state: SharedState, include_sql: bool = False) -> Dict[str, Any]:
+    if not state.sql_attempts:
+        return {"exists": False}
+    return sql_attempt_for_planner(len(state.sql_attempts), state.sql_attempts[-1], include_sql=include_sql)
+
+
+def sql_attempt_for_planner(idx: int, attempt: SQLAttempt, include_sql: bool = False) -> Dict[str, Any]:
     result = attempt.result or {}
     body = result.get("result") or {}
     rows = body.get("rows") or []
-    return {
+    payload = {
+        "exists": True,
         "attempt_idx": idx,
-        "sql": attempt.sql,
         "status": attempt.status,
         "ok": bool(result.get("ok")),
         "error": result.get("error", ""),
@@ -915,6 +904,9 @@ def sql_attempt_for_planner(idx: int, attempt: SQLAttempt) -> Dict[str, Any]:
         "truncated": body.get("truncated", False),
         "warnings": sql_attempt_warnings(result),
     }
+    if include_sql:
+        payload["sql"] = attempt.sql
+    return payload
 
 
 def sql_attempt_warnings(result: Dict[str, Any]) -> List[str]:

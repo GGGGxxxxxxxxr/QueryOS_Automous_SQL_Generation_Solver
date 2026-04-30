@@ -97,14 +97,17 @@ class EventTracer:
                 return ""
             payload = event.get("payload") or {}
             summary = payload.get("summary") or {}
-            latest = summary.get("latest_sql_attempt") or {}
+            latest = summary.get("submission_SQL") or {}
             parts = [
                 f"writer={payload.get('writer')}",
                 f"tables={summary.get('table_count', 0)}",
                 f"sql_attempts={summary.get('sql_attempt_count', 0)}",
             ]
             if latest:
-                parts.append(f"latest_sql=#{latest.get('attempt_idx')} {latest.get('status')} rows={latest.get('row_count')}")
+                parts.append(
+                    f"submission_SQL=#{latest.get('attempt_idx')} "
+                    f"{latest.get('status')} rows={latest.get('row_count')}"
+                )
             warnings = payload.get("warnings") or []
             if warnings:
                 parts.append(f"warnings={self._shorten(str(warnings), 160)}")
@@ -529,16 +532,16 @@ class EventTracer:
         lines.append(f"{indent}  validations: {summary.get('validation_attempt_count', 0)}")
         if summary.get("workflow_status"):
             lines.append(f"{indent}  workflow: {summary.get('workflow_status')}")
-        latest = summary.get("latest_sql_attempt") or {}
+        latest = summary.get("submission_SQL") or {}
         if latest:
             lines.append(
-                f"{indent}  latest sql: #{latest.get('attempt_idx')} "
+                f"{indent}  submission_SQL: #{latest.get('attempt_idx')} "
                 f"{latest.get('status')} rows={latest.get('row_count')}"
             )
         latest_validation = summary.get("latest_validation") or {}
         if latest_validation:
             lines.append(
-                f"{indent}  latest validation: #{latest_validation.get('validation_idx')} "
+                f"{indent}  submission_SQL validation: #{latest_validation.get('validation_idx')} "
                 f"{latest_validation.get('status')}"
             )
         lines.append(f"{indent}  planner steps: {summary.get('planner_step_count', 0)}")

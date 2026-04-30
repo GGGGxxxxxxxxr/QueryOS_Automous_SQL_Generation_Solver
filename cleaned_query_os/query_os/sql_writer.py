@@ -176,7 +176,7 @@ class SQLWriterAgent:
                     f"MANAGER GUIDANCE:\n{guidance}\n\n"
                     "CURRENT discovered_schema:\n"
                     f"{format_discovered_schema(state)}\n\n"
-                    "SQL_HISTORY:\n"
+                    "SQL_HISTORY (writer-only diagnostic context; not part of submission_SQL):\n"
                     f"{format_sql_history(state)}\n"
                 ),
             },
@@ -436,7 +436,7 @@ class SQLWriterAgent:
         candidates = self._run_initial_group_workers(state, guidance, worker_ids)
         viable = [candidate for candidate in candidates.values() if candidate.current_sql and candidate.result_ok()]
         if not viable:
-            report = "SQL writer group produced no executable SQL candidate."
+            report = "SQL writer group produced no executable SQL proposal."
             self.tracer.emit(
                 "writer_group_divergence",
                 "SWA",

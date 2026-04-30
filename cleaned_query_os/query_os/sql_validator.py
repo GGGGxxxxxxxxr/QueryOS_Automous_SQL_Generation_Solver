@@ -17,7 +17,7 @@ SQL_VALIDATOR_TOOLS = [
         "type": "function",
         "function": {
             "name": "VALIDATION_PASS",
-            "description": "Mark the latest SQL candidate as validated.",
+            "description": "Mark the current submission_SQL as validated.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -33,7 +33,7 @@ SQL_VALIDATOR_TOOLS = [
         "type": "function",
         "function": {
             "name": "VALIDATION_FAIL",
-            "description": "Reject the latest SQL candidate and explain the validation feedback.",
+            "description": "Reject the current submission_SQL and explain the validation feedback.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -111,7 +111,7 @@ class SQLValidatorAgent:
                 state,
                 sql_attempt_idx=0,
                 issues=[{"type": "execution_error", "detail": "No SQL attempt exists to validate."}],
-                feedback="No SQL attempt exists to validate. The planner should request a SQL candidate first.",
+                feedback="No submission_SQL exists to validate. The planner should request a SQL writer attempt first.",
                 report="Validation failed because there is no SQL attempt.",
             )
 
@@ -120,7 +120,7 @@ class SQLValidatorAgent:
             "SVA",
             "SQL validator worker started.",
             global_step=global_step,
-            payload={"guidance": "Validate the latest SQL candidate before planner can finish."},
+            payload={"guidance": "Validate the current submission_SQL before planner can finish."},
         )
         blocking_issues = blocking_result_issues(latest_attempt.result or {})
         if blocking_issues:
@@ -132,9 +132,9 @@ class SQLValidatorAgent:
                 worker_step=1,
             )
             feedback = (
-                "The latest SQL result is not acceptable: "
+                "The submission_SQL result is not acceptable: "
                 + "; ".join(issue["detail"] for issue in blocking_issues)
-                + ". Planner should request a revised SQL candidate."
+                + ". Planner should request a revised submission_SQL."
             )
             return self._record_fail(
                 state,
@@ -158,7 +158,7 @@ class SQLValidatorAgent:
             {
                 "role": "user",
                 "content": (
-                    "Validate the latest SQL candidate.\n\n"
+                    "Validate the current submission_SQL.\n\n"
                     f"{format_validator_context(state)}\n\n"
                     "Call exactly one validation tool."
                 ),
@@ -182,7 +182,7 @@ class SQLValidatorAgent:
                 sql_attempt_idx=sql_attempt_idx,
                 status="error",
                 issues=[{"type": "other", "detail": err}],
-                feedback="Validation could not run. Planner should inspect the latest SQL candidate and decide whether to retry.",
+                feedback="Validation could not run. Planner should inspect the submission_SQL status and decide whether to retry.",
                 report=err,
             )
             state.validation_attempts.append(attempt)
@@ -213,7 +213,7 @@ class SQLValidatorAgent:
                 state,
                 sql_attempt_idx=sql_attempt_idx,
                 issues=[{"type": "other", "detail": detail}],
-                feedback="Validator did not emit a clear decision. Planner should inspect the latest SQL candidate and decide whether to retry.",
+                feedback="Validator did not emit a clear decision. Planner should inspect the submission_SQL and decide whether to retry.",
                 report="Validation failed because validator emitted no clear decision.",
             )
 
@@ -226,7 +226,7 @@ class SQLValidatorAgent:
                 state,
                 sql_attempt_idx=sql_attempt_idx,
                 issues=[{"type": "other", "detail": f"Validator emitted invalid JSON: {exc}"}],
-                feedback="Validator emitted invalid JSON. Planner should inspect the latest SQL candidate and decide whether to retry.",
+                feedback="Validator emitted invalid JSON. Planner should inspect the submission_SQL and decide whether to retry.",
                 report="Validation failed because validator emitted invalid JSON.",
             )
 
@@ -240,7 +240,7 @@ class SQLValidatorAgent:
         )
 
         if name == "VALIDATION_PASS":
-            reason = str(args.get("reason") or "SQL candidate passed validation.").strip()
+            reason = str(args.get("reason") or "submission_SQL passed validation.").strip()
             confidence = str(args.get("confidence") or "").strip()
             attempt = ValidationAttempt(
                 sql_attempt_idx=sql_attempt_idx,
@@ -280,7 +280,7 @@ class SQLValidatorAgent:
             issues = clean_issues(args.get("issues"))
             feedback = str(args.get("feedback") or "").strip()
             if not feedback:
-                feedback = "The latest SQL candidate does not sufficiently satisfy the question and evidence."
+                feedback = "The submission_SQL does not sufficiently satisfy the question and evidence."
             severity = str(args.get("severity") or "blocking").strip()
             if severity != "blocking":
                 reason = f"Validation passed with non-blocking concerns: {feedback}"
@@ -333,7 +333,7 @@ class SQLValidatorAgent:
             state,
             sql_attempt_idx=sql_attempt_idx,
             issues=[{"type": "other", "detail": f"Validator emitted unknown tool: {name}"}],
-            feedback="Validator emitted an unknown tool. Planner should inspect the latest SQL candidate and decide whether to retry.",
+            feedback="Validator emitted an unknown tool. Planner should inspect the submission_SQL and decide whether to retry.",
             report="Validation failed because validator emitted an unknown tool.",
             worker_step=1,
         )
@@ -412,7 +412,7 @@ def format_validator_context(state: SharedState) -> str:
     latest_warnings = list((latest_body or {}).get("warnings", []))
     if latest_rows and any(any(cell is None for cell in row) for row in latest_rows):
         latest_warnings.append("result contains NULL values")
-    latest = {
+    submission_sql = {
         "attempt_idx": len(state.sql_attempts),
         "sql": latest_attempt.sql if latest_attempt else "",
         "status": latest_attempt.status if latest_attempt else "",
@@ -428,6 +428,10 @@ def format_validator_context(state: SharedState) -> str:
             "question": state.question,
             "external_knowledge": state.external_knowledge,
             "workflow_status": state.workflow_status.value,
+            "context_policy": (
+                "Only submission_SQL is eligible for validation and final presentation. "
+                "No previous SQL attempts are provided; they cannot contribute part of the answer."
+            ),
             "discovered_schema": [
                 {
                     "table": table,
@@ -438,8 +442,8 @@ def format_validator_context(state: SharedState) -> str:
                 }
                 for table, ev in state.discovered.tables.items()
             ],
-            "latest_sql_attempt": latest,
-            "previous_validation_attempts": [
+            "submission_SQL": submission_sql,
+            "previous_validation_feedback": [
                 {
                     "sql_attempt_idx": item.sql_attempt_idx,
                     "status": item.status,
@@ -448,6 +452,7 @@ def format_validator_context(state: SharedState) -> str:
                     "report": item.report,
                 }
                 for item in state.validation_attempts[-3:]
+                if item.status in {"fail", "error"}
             ],
         },
         ensure_ascii=False,
@@ -465,7 +470,7 @@ def clean_issues(value: Any) -> List[Dict[str, Any]]:
         detail = str(item.get("detail") or "").strip()
         cleaned.append({"type": issue_type, "detail": detail})
     if not cleaned:
-        cleaned.append({"type": "other", "detail": "Validator rejected the SQL candidate."})
+        cleaned.append({"type": "other", "detail": "Validator rejected the submission_SQL."})
     return cleaned
 
 

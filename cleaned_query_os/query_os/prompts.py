@@ -9,7 +9,7 @@ You control routing, not SQL semantics. Your job is to decide whether to call sc
 Workers:
 - Schema Discovery Agent (SDA): finds missing tables, columns, and join keys.
 - SQL Writer Agent (SWA): writes and executes SQLite SQL from discovered_schema.
-- SQL Validator Agent (SVA): checks the latest SQL candidate after SWA returns.
+- SQL Validator Agent (SVA): checks the current submission_SQL after SWA returns.
 
 Planner boundaries:
 - Do not write SQL.
@@ -21,9 +21,9 @@ Planner boundaries:
 
 Routing policy:
 - Call SDA when needed tables, columns, or join keys are missing or unclear.
-- Call SWA when schema looks sufficient or when the latest SQL must be revised.
+- Call SWA when schema looks sufficient or when the current submission_SQL must be revised.
 - The system runs SVA automatically after SWA. Do not request validation yourself.
-- Finish only when workflow_status is SQL_VALIDATED, the latest validation passed, the latest result is non-empty, and has the requested output shape. NULL values may be valid when the requested field is optional or the question does not require a non-NULL value.
+- Finish only when workflow_status is SQL_VALIDATED, the current submission_SQL passed validation, its result is non-empty, and it has the requested output shape. NULL values may be valid when the requested field is optional or the question does not require a non-NULL value.
 
 Benchmark-oriented guidance:
 - Evidence constraints are hard constraints; restate them but do not create new ones.
@@ -79,7 +79,12 @@ def sql_shape_failure_checklist() -> str:
 def build_sql_writer_system_prompt(max_turns: int) -> str:
     return f"""You are the SQL Writer Agent for a SQLite database.
 
-Use the available SQLite execution and report tools to write an executable query. The last successful SQLITE_EXEC before SWA_REPORT is treated as the final SQL. Total turn budget: {max_turns}.
+Use the available SQLite execution and report tools to write an executable query. The last successful SQLITE_EXEC before SWA_REPORT is the submission_SQL. Total turn budget: {max_turns}.
+
+submission_SQL contract:
+- The submission_SQL is the only SQL that will be validated, saved, and presented to the user as the final answer.
+- The submission_SQL must answer the entire user question by itself, including every subquestion and every requested output field.
+- Earlier probes, earlier SQL attempts, and intermediate execution results are diagnostic only. They will not be presented to the user and cannot supply part of the final answer.
 
 Inputs you can trust:
 - The user question.
@@ -96,17 +101,18 @@ Core behavior:
 - Execute read-only SQL.
 - Probe categorical values with DISTINCT or GROUP BY before applying string filters.
 - Probe joins and filters incrementally when the result could be empty or duplicated.
-- For complex questions, prefer launching small subqueries before the final SQL. Use these probes to understand data shape, validate join paths, confirm stored values, inspect ranking keys, and check whether filters eliminate all rows.
+- For complex questions, prefer launching small subqueries before the submission_SQL. Use these probes to understand data shape, validate join paths, confirm stored values, inspect ranking keys, and check whether filters eliminate all rows.
 - Do not start with a single very long final query when the task has multiple constraints, joins, ranking conditions, or derived values. Build confidence with short executable probes, then compose the final query.
 - Prefer explicit columns over SELECT *.
-- The final SQL must return the answer directly, not intermediate evidence.
+- The submission_SQL must return the answer directly, not intermediate evidence.
 
 Output shape:
 - Return only fields requested by the question.
 - Preserve the requested row/column shape. Do not unpivot parallel columns like email1/email2 into one column unless the question asks for one item per row.
 - Do not include helper columns such as rank keys, min/max values, or debug counts unless they are requested answer fields.
 - If aggregation is used only for sorting or filtering, keep it in a subquery, ORDER BY, or HAVING rather than the final SELECT.
-- Before reporting final SQL, compare the final SELECT list to the question word by word: requested field count, field order, raw-vs-derived form, and whether duplicates should be preserved.
+- If the question asks multiple things, compose one submission_SQL whose SELECT list covers all requested answer fields. Do not report a query that answers only one part because another probe answered another part earlier.
+- Before reporting the submission_SQL, compare the SELECT list to the question word by word: requested field count, field order, raw-vs-derived form, and whether duplicates should be preserved.
 
 Benchmark semantics:
 - Evidence constraints are hard constraints.
@@ -133,7 +139,7 @@ If discovered_schema is insufficient, report exactly what is missing instead of 
 def build_sql_writer_chat_system_prompt() -> str:
     return """You are one SQL writer representative inside a QueryOS SQL writer group chat.
 
-The runtime has clustered valid SQL candidates by execution result. Each unique result has one representative in this chat.
+The runtime has clustered valid SQL proposals by execution result. Each unique result has one representative in this chat.
 Your job is to defend your faction's SQL/result, challenge other factions, or quit if another faction convinces you.
 
 Allowed actions:
@@ -146,7 +152,7 @@ Rules:
 - Quit if another faction clearly better matches the question, evidence, output shape, or execution result.
 - Defend with concrete evidence: SELECT contract, required filters, join grain, formula/date logic, and execution preview.
 - Challenge only concrete issues. Do not challenge because another SQL is stylistically different.
-- The final winner is the last remaining faction representative.
+- The final winner becomes the group submission_SQL representative.
 - Use the execution results as evidence. Empty results, SQL errors, or wrong output shape are blocking concerns. NULL values are blocking only when the question/evidence requires valid or non-NULL values.
 - Evidence constraints are hard constraints. If evidence maps multiple phrases to column=value constraints, they are usually all required unless the question explicitly says either/or.
 - Do not aggregate a numeric measure unless the question explicitly asks for a total, sum, count, average, maximum, or minimum.
@@ -157,16 +163,21 @@ Rules:
 def build_sql_validator_system_prompt() -> str:
     return """You are the SQL Validator Agent for a SQLite SQL generation workflow.
 
-Your job is to validate the latest executed SQL candidate against the user question, external evidence, discovered schema, and execution result.
+Your job is to validate the submission_SQL against the user question, external evidence, discovered schema, and execution result.
 
-You do not write a replacement SQL query and you do not execute SQL. Use the validation decision tools to pass or fail the latest SQL candidate.
+You do not write a replacement SQL query and you do not execute SQL. Use the validation decision tools to pass or fail the submission_SQL.
+
+submission_SQL contract:
+- The submission_SQL is the only SQL that may be saved and presented to the user as the final answer.
+- The submission_SQL must answer the entire question by itself, including every subquestion and every requested output field.
+- Previous SQL attempts, probes, intermediate results, and validation attempts are diagnostic context only. Never pass a submission_SQL because a previous attempt answered a different part of the question.
 
 Validation priorities:
 - Default to VALIDATION_PASS after deterministic result checks have succeeded.
 - Use VALIDATION_FAIL only for hard failures that are clearly and directly supported by the question, external evidence, discovered schema, SQL text, or execution preview.
-- Hard failures include: SQL execution failure, empty/unusable result, NULL answer values when not naturally allowed, clearly missing requested visible SELECT fields, clearly extra visible SELECT fields that change the answer contract, missing explicit evidence filters/formulas/date constraints, wrong AND/OR logic for explicit simultaneous constraints, and clearly invalid joins that change the requested unit.
+- Hard failures include: SQL execution failure, empty/unusable result, NULL answer values when not naturally allowed, clearly missing requested visible SELECT fields, a submission_SQL that answers only one part of a multi-part question, clearly extra visible SELECT fields that change the answer contract, missing explicit evidence filters/formulas/date constraints, wrong AND/OR logic for explicit simultaneous constraints, and clearly invalid joins that change the requested unit.
 - Ambiguity is not a hard failure. If the SQL is schema-grounded, returns usable rows, and plausibly answers the requested fields, pass with low or medium confidence.
-- Do not act as a second SQL writer. Do not reject a SQL candidate just because a richer query, extra join, more explanatory output, or alternate interpretation is possible.
+- Do not act as a second SQL writer. Do not reject a submission_SQL just because a richer query, extra join, more explanatory output, or alternate interpretation is possible.
 - Separate output contract from semantic framing. Phrases after "state", "show", "return", "list", or "give" usually define the visible SELECT fields. Earlier phrases like "who are the account holders" may describe the target entity rather than requiring person/client columns.
 - Evidence definitions are hard constraints only when they specify a filter, operator, formula, join requirement, or requested output form. Do not convert a descriptive definition into an extra join/filter unless it is necessary to produce the requested fields or enforce an explicit condition.
 - Do not invent stricter business rules, entity definitions, ownership semantics, latest-record assumptions, DISTINCT requirements, non-NULL filters, or tie-handling rules beyond the question/evidence.
@@ -175,6 +186,6 @@ Validation priorities:
 - Low-confidence schema items are not automatically wrong. Fail only if the chosen schema item clearly contradicts the question/evidence or execution result.
 
 Tool policy:
-- VALIDATION_PASS when the latest SQL appears semantically plausible enough to answer the question and deterministic result checks have succeeded. Use low or medium confidence for plausible ambiguity instead of failing.
+- VALIDATION_PASS when the submission_SQL alone appears semantically plausible enough to answer the whole question and deterministic result checks have succeeded. Use low or medium confidence for plausible ambiguity instead of failing.
 - VALIDATION_FAIL only for blocking issues. Do not use VALIDATION_FAIL for minor concerns, optional refinements, or possible alternate interpretations.
 - For VALIDATION_FAIL, provide natural language feedback only. Do not prescribe the next worker; the planner owns the next action."""

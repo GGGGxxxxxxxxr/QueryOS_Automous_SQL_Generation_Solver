@@ -83,20 +83,17 @@ def summarize_delta_for_planner(delta_payload: Dict[str, Any]) -> Dict[str, Any]
     if delta.get("updated_tables"):
         compact_delta["updated_tables"] = delta.get("updated_tables")
     if delta.get("added_sql_attempts"):
-        compact_delta["added_sql_attempts"] = [
-            {
-                "attempt_idx": attempt.get("attempt_idx"),
-                "sql": attempt.get("sql", ""),
-                "status": attempt.get("status"),
-                "ok": attempt.get("ok"),
-                "columns": attempt.get("columns", []),
-                "row_count": attempt.get("row_count"),
-                "preview_rows": attempt.get("preview_rows", []),
-                "warnings": attempt.get("warnings", []),
-                "error": attempt.get("error", ""),
-            }
-            for attempt in delta.get("added_sql_attempts") or []
-        ]
+        latest_attempt = (delta.get("added_sql_attempts") or [])[-1]
+        compact_delta["submission_SQL_update"] = {
+            "attempt_idx": latest_attempt.get("attempt_idx"),
+            "status": latest_attempt.get("status"),
+            "ok": latest_attempt.get("ok"),
+            "columns": latest_attempt.get("columns", []),
+            "row_count": latest_attempt.get("row_count"),
+            "preview_rows": latest_attempt.get("preview_rows", []),
+            "warnings": latest_attempt.get("warnings", []),
+            "error": latest_attempt.get("error", ""),
+        }
     if delta.get("added_validation_attempts"):
         compact_delta["added_validation_attempts"] = delta.get("added_validation_attempts")
     if delta.get("updated_planner_steps"):
@@ -130,7 +127,7 @@ def summarize_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "planner_step_count": len(snapshot.get("planner_trace") or []),
     }
     if latest_attempt:
-        summary["latest_sql_attempt"] = {
+        summary["submission_SQL"] = {
             "attempt_idx": latest_attempt.get("attempt_idx"),
             "status": latest_attempt.get("status"),
             "row_count": latest_attempt.get("row_count"),
