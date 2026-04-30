@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from collections import Counter, defaultdict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from itertools import permutations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -53,6 +54,7 @@ def main() -> int:
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--max-rows", type=int, default=2000, help="0 means fetch all rows.")
     parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--workers", type=int, default=1, help="Number of records to recheck concurrently.")
     parser.add_argument("--preview-rows", type=int, default=10)
     parser.add_argument("--max-projection-combinations", type=int, default=20000)
     parser.add_argument(
@@ -86,47 +88,22 @@ def main() -> int:
     counters: Dict[str, int] = defaultdict(int)
     clusters: Dict[str, int] = defaultdict(int)
     resolved_clusters: Dict[str, int] = defaultdict(int)
+    print(f"[recheck] selected records: {len(records)}")
+    print(f"[recheck] workers: {max(1, int(args.workers or 1))}")
 
     with output_jsonl.open("w", encoding="utf-8") as true_handle:
         resolved_handle = resolved_jsonl.open("w", encoding="utf-8") if resolved_jsonl else None
         try:
-            for idx, record in enumerate(records, start=1):
-                qid = record.get("question_id")
-                db_id = record.get("db_id")
-                if should_print_progress(idx, len(records), args.progress_every):
-                    print(f"[recheck] start {idx}/{len(records)} qid={qid} db={db_id}", flush=True)
-                analysis = recheck_record(
-                    record=record,
-                    dataset_root=dataset_root,
-                    max_rows=args.max_rows,
-                    timeout=args.timeout,
-                    preview_rows=args.preview_rows,
-                    max_projection_combinations=args.max_projection_combinations,
-                )
-                annotated = dict(record)
-                annotated["relaxed_recheck"] = analysis
-                counters["processed"] += 1
-
-                cluster = str(analysis.get("cluster") or "unknown")
-                if analysis.get("true_error"):
-                    counters["true_error"] += 1
-                    clusters[cluster] += 1
-                    true_handle.write(json.dumps(annotated, ensure_ascii=False, default=str) + "\n")
-                    true_handle.flush()
-                else:
-                    counters["relaxed_non_error"] += 1
-                    resolved_clusters[cluster] += 1
-                    if resolved_handle:
-                        resolved_handle.write(json.dumps(annotated, ensure_ascii=False, default=str) + "\n")
-                        resolved_handle.flush()
-
-                if should_print_progress(idx, len(records), args.progress_every):
-                    print(
-                        f"[recheck] done {idx}/{len(records)} qid={qid} cluster={cluster} "
-                        f"true_error={bool(analysis.get('true_error'))}; "
-                        f"true={counters['true_error']} relaxed={counters['relaxed_non_error']}",
-                        flush=True,
-                    )
+            run_recheck_pool(
+                records=records,
+                args=args,
+                dataset_root=dataset_root,
+                true_handle=true_handle,
+                resolved_handle=resolved_handle,
+                counters=counters,
+                clusters=clusters,
+                resolved_clusters=resolved_clusters,
+            )
         finally:
             if resolved_handle:
                 resolved_handle.close()
@@ -148,6 +125,104 @@ def main() -> int:
         print(f"[recheck] relaxed non-errors: {resolved_jsonl}")
     print(f"[recheck] summary: {summary_json}")
     return 0
+
+
+def run_recheck_pool(
+    *,
+    records: List[Dict[str, Any]],
+    args: argparse.Namespace,
+    dataset_root: Path,
+    true_handle: Any,
+    resolved_handle: Optional[Any],
+    counters: Dict[str, int],
+    clusters: Dict[str, int],
+    resolved_clusters: Dict[str, int],
+) -> None:
+    total = len(records)
+    workers = max(1, int(args.workers or 1))
+    next_pos = 0
+    in_flight: Dict[Any, Tuple[int, Dict[str, Any]]] = {}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        while next_pos < total or in_flight:
+            while next_pos < total and len(in_flight) < workers:
+                idx = next_pos + 1
+                record = records[next_pos]
+                next_pos += 1
+                if should_print_progress(idx, total, args.progress_every):
+                    print(
+                        f"[recheck] start {idx}/{total} qid={record.get('question_id')} db={record.get('db_id')}",
+                        flush=True,
+                    )
+                future = pool.submit(
+                    recheck_record,
+                    record=record,
+                    dataset_root=dataset_root,
+                    max_rows=args.max_rows,
+                    timeout=args.timeout,
+                    preview_rows=args.preview_rows,
+                    max_projection_combinations=args.max_projection_combinations,
+                )
+                in_flight[future] = (idx, record)
+
+            if not in_flight:
+                continue
+
+            done, _ = wait(in_flight.keys(), return_when=FIRST_COMPLETED)
+            for future in done:
+                idx, record = in_flight.pop(future)
+                analysis = future.result()
+                write_recheck_result(
+                    idx=idx,
+                    total=total,
+                    record=record,
+                    analysis=analysis,
+                    args=args,
+                    true_handle=true_handle,
+                    resolved_handle=resolved_handle,
+                    counters=counters,
+                    clusters=clusters,
+                    resolved_clusters=resolved_clusters,
+                )
+
+
+def write_recheck_result(
+    *,
+    idx: int,
+    total: int,
+    record: Dict[str, Any],
+    analysis: Dict[str, Any],
+    args: argparse.Namespace,
+    true_handle: Any,
+    resolved_handle: Optional[Any],
+    counters: Dict[str, int],
+    clusters: Dict[str, int],
+    resolved_clusters: Dict[str, int],
+) -> None:
+    annotated = dict(record)
+    annotated["relaxed_recheck"] = analysis
+    counters["processed"] += 1
+
+    cluster = str(analysis.get("cluster") or "unknown")
+    if analysis.get("true_error"):
+        counters["true_error"] += 1
+        clusters[cluster] += 1
+        true_handle.write(json.dumps(annotated, ensure_ascii=False, default=str) + "\n")
+        true_handle.flush()
+    else:
+        counters["relaxed_non_error"] += 1
+        resolved_clusters[cluster] += 1
+        if resolved_handle:
+            resolved_handle.write(json.dumps(annotated, ensure_ascii=False, default=str) + "\n")
+            resolved_handle.flush()
+
+    if should_print_progress(idx, total, args.progress_every):
+        print(
+            f"[recheck] done {idx}/{total} qid={record.get('question_id')} cluster={cluster} "
+            f"true_error={bool(analysis.get('true_error'))}; "
+            f"true={counters['true_error']} relaxed={counters['relaxed_non_error']}",
+            flush=True,
+        )
 
 
 def recheck_record(
