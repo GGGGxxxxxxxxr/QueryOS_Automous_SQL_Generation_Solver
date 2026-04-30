@@ -17,12 +17,13 @@ Planner boundaries:
 - Do not resolve ambiguous phrases from commonsense. Ask SDA/SWA to investigate them.
 - You may name tables/columns already present in discovered_schema or worker feedback.
 - You may be specific when prior calls exposed concrete problems: SQL errors, empty results, NULL results, wrong output shape, missing schema, wrong joins, or validation feedback.
+- Do not micromanage worker execution. Avoid teacher-like step-by-step plans such as "Step 1, Step 2, Step 3"; give one concise routing instruction that states the current blocker or objective, and let the worker choose the probes/query structure.
 
 Routing policy:
 - Call SDA when needed tables, columns, or join keys are missing or unclear.
 - Call SWA when schema looks sufficient or when the latest SQL must be revised.
 - The system runs SVA automatically after SWA. Do not request validation yourself.
-- Finish only when workflow_status is SQL_VALIDATED, the latest validation passed, the latest result is non-empty, contains no NULL answer values, and has the requested output shape.
+- Finish only when workflow_status is SQL_VALIDATED, the latest validation passed, the latest result is non-empty, and has the requested output shape. NULL values may be valid when the requested field is optional or the question does not require a non-NULL value.
 
 Benchmark-oriented guidance:
 - Evidence constraints are hard constraints; restate them but do not create new ones.
@@ -33,7 +34,8 @@ Benchmark-oriented guidance:
 Debugging guidance:
 - For string filters, ask SWA to probe DISTINCT values.
 - For join concerns, ask SWA to compare counts before and after joins.
-- For top-k/ranking, ask SWA to compute the ranking key first, then return only requested final fields."""
+- For top-k/ranking, ask SWA to check the ranking key and return only requested final fields.
+- Keep worker guidance short. Mention only the next necessary concern, not a full recipe for solving the query."""
 
 
 def build_schema_discovery_system_prompt(metadata_display: str, db_name: str) -> str:
@@ -56,6 +58,22 @@ Avoid:
 - Adding every column just in case.
 - Inventing foreign keys or unavailable metadata facts.
 - Keeping irrelevant tables in discovered_schema."""
+
+
+def sql_shape_failure_checklist() -> str:
+    return """SQL shape failure checklist learned from prior failures:
+- Final SELECT contract: return exactly the requested answer fields, in a natural question/evidence order. Do not add helper fields such as counts, totals, ranks, IDs, names, dates, amounts, or sort keys unless they are answer fields. Do not omit requested visible fields.
+- Raw vs derived fields: use the field form requested by the question/evidence. Do not concatenate parallel columns, unpivot email/name columns, translate raw codes into labels, or join lookup names when the requested output is the raw ID/code column.
+- Rowset vs scalar: decide whether the question asks for a list of rows, a yes/no value, or one aggregate scalar. Do not replace a requested list with COUNT/GROUP_CONCAT, and do not expand a requested scalar into detailed rows.
+- DISTINCT policy: use DISTINCT only when the question asks for unique entities/values or duplicate rows are clearly accidental. Do not use DISTINCT for transaction/log/lab/monthly records that should remain one row per record. Add DISTINCT when asking for unique names, codes, descriptions, coordinates, colors, languages, or patient/customer IDs.
+- Counting policy: choose COUNT(*), COUNT(column), and COUNT(DISTINCT column) deliberately. COUNT(*) counts rows, COUNT(column) ignores NULLs, and COUNT(DISTINCT column) counts unique entities. Do not switch between entity counts and record counts without evidence.
+- Aggregation grain: GROUP BY the entity the question asks per. Keep sorting-only aggregates out of the final SELECT unless requested. For monthly/yearly peaks, aggregate per month/year first, then sort the aggregate.
+- Top, extreme, and ties: use LIMIT only when one row is explicitly requested. For "rank", return a RANK()/DENSE_RANK() column when the question asks to rank. For max/min groups, preserve ties when the wording implies all matching entities.
+- Join path and multiplicity: use the table where the requested attribute actually lives. Avoid unnecessary joins that filter rows away or multiply rows. Probe before/after join counts when joining one-to-many tables.
+- WHERE logic: map each evidence phrase to the correct column/value/operator. Use parentheses around mixed AND/OR conditions. Do not add IS NOT NULL, latest/recent, grade-span, status, or value filters unless the question/evidence requires them.
+- Date/time shape: follow the evidence date expression exactly. Distinguish year-only filters from full date ranges, current age from age at event/exam date, and exact time equality from LIKE prefixes such as '1:54%'.
+- Numeric formula shape: follow the specified numerator, denominator, scaling, and precision. Do not round final percentages/ratios unless asked. Do not use precomputed percentage/rate columns when evidence gives a formula to compute.
+- NULL and ordering: do not add IS NOT NULL filters unless required by the question/evidence or needed to prevent NULL from winning an extreme-value sort. Preserve rows with NULL optional fields when the requested output field can naturally be NULL."""
 
 
 def build_sql_writer_system_prompt(max_turns: int) -> str:
@@ -88,6 +106,7 @@ Output shape:
 - Preserve the requested row/column shape. Do not unpivot parallel columns like email1/email2 into one column unless the question asks for one item per row.
 - Do not include helper columns such as rank keys, min/max values, or debug counts unless they are requested answer fields.
 - If aggregation is used only for sorting or filtering, keep it in a subquery, ORDER BY, or HAVING rather than the final SELECT.
+- Before reporting final SQL, compare the final SELECT list to the question word by word: requested field count, field order, raw-vs-derived form, and whether duplicates should be preserved.
 
 Benchmark semantics:
 - Evidence constraints are hard constraints.
@@ -98,13 +117,15 @@ Benchmark semantics:
 - Do not aggregate numeric measure columns unless the question explicitly asks for total, sum, overall, average, maximum, minimum, or row count.
 - If a table already has a measure column like Enrollment, Sales, Count, Rate, or Score and the question asks for that measure, return the measure values directly unless aggregation is explicit.
 
+{sql_shape_failure_checklist()}
+
 Numerical and SQL safety:
 - Use REAL arithmetic for ratios, averages, percentages, and division.
 - Handle divide-by-zero with NULLIF.
 - Distinguish difference, ratio, percentage, percentage change, average, and count.
 - COUNT(*) and COUNT(column) are not interchangeable.
 - LEFT JOIN plus WHERE filters can change join semantics.
-- Final answer rows must not contain NULL values.
+- Final answer rows may contain NULL values when the requested field is optional or the evidence does not require a valid/non-NULL value. Do not remove rows only to avoid NULLs.
 
 If discovered_schema is insufficient, report exactly what is missing instead of guessing."""
 
@@ -122,9 +143,10 @@ Allowed actions:
 Rules:
 - Agree only with a worker's current SQL, not a historical SQL.
 - If you revise, produce a complete read-only SQLite query.
-- Use the execution results as evidence. Empty results, any NULL answer value, SQL errors, or wrong output shape are blocking concerns.
+- Use the execution results as evidence. Empty results, SQL errors, or wrong output shape are blocking concerns. NULL values are blocking only when the question/evidence requires valid or non-NULL values.
 - Evidence constraints are hard constraints. If evidence maps multiple phrases to column=value constraints, they are usually all required unless the question explicitly says either/or.
 - Do not aggregate a numeric measure unless the question explicitly asks for a total, sum, count, average, maximum, or minimum.
+- Check common SQL shape mistakes before agreeing: extra/missing SELECT columns, missing or excessive DISTINCT, COUNT vs COUNT(DISTINCT), scalar vs rowset mismatch, unnecessary LIMIT 1, wrong GROUP BY grain, wrong ORDER BY direction/field, wrong join path, and percentage denominator/scaling errors.
 - Keep the reason short and specific."""
 
 
@@ -140,15 +162,21 @@ Validation priorities:
 - Check that evidence constraints are used faithfully. If evidence maps multiple phrases to column=value constraints, those constraints are usually all required unless the question explicitly says either/or.
 - Check boolean logic. Flag OR when the question/evidence requires multiple simultaneous constraints.
 - Check SELECT shape. The selected columns should directly answer the question, without missing requested fields or adding irrelevant fields.
+- Check exact answer grain: scalar vs rowset, one row per entity vs one row per record, and whether duplicate rows should be preserved or removed.
+- Check DISTINCT and counting grammar. DISTINCT, COUNT(*), COUNT(column), and COUNT(DISTINCT column) must match the requested unit of analysis.
 - Check aggregation. Aggregating a measure column with SUM/AVG/MAX/MIN is wrong unless the question explicitly asks for total, sum, overall, average, maximum, or minimum.
+- Check GROUP BY keys. The grouping grain must match the requested "per each/by" entity, and sorting/filtering aggregates should not leak into the final SELECT unless requested.
 - Check top/extreme-value semantics. If SQL uses ORDER BY attribute LIMIT 1 to choose a single entity for a "biggest/highest/lowest/smallest by attribute" phrase, verify that this does not incorrectly discard tied rows or groups sharing the same extreme attribute value.
+- Check ranking semantics. A question that asks to rank usually requires a RANK()/DENSE_RANK() output column, not just ORDER BY.
 - Check joins against discovered foreign keys when multiple tables are used.
-- Check ranking/aggregation queries for NULL issues, especially lowest/highest/top/bottom/rate questions.
-- NULL result values are not acceptable. Any NULL in the returned answer rows is a blocking issue, including a single aggregate row like SUM(...)=NULL.
-- Check suspicious execution results: empty result, any NULL answer value, or preview rows that clearly do not answer the question.
+- Check join multiplicity. Fail SQL that uses unnecessary joins causing duplicate counts, lost rows, or a different record/entity grain.
+- Check date/time and numeric expression shapes against evidence: year-only vs full-date filters, current age vs age-at-event, LIKE time prefixes vs exact time equality, ratio/percentage denominator, scaling by 100, and no rounding unless requested.
+- Check ranking/aggregation queries for NULL issues, especially lowest/highest/top/bottom/rate questions where NULL can win or erase a computation.
+- NULL result values are acceptable only when they are natural values of requested optional fields. Fail NULLs when evidence requires valid/non-NULL values or when an aggregate result is NULL because no rows matched.
+- Check suspicious execution results: empty result, invalid NULL answer value, or preview rows that clearly do not answer the question.
 - If discovered schema is insufficient to validate or answer correctly, fail and explain what is missing in natural language feedback.
 
 Tool policy:
-- VALIDATION_PASS only when the latest SQL appears semantically correct and the result is usable with no NULL answer values.
+- VALIDATION_PASS only when the latest SQL appears semantically correct and the result is usable. NULL answer values are acceptable only when the requested field is optional or the evidence does not require valid/non-NULL values.
 - VALIDATION_FAIL for blocking semantic issues, missing constraints, wrong output shape, wrong joins, NULL ranking problems, or insufficient schema.
 - For VALIDATION_FAIL, provide natural language feedback only. Do not prescribe the next worker; the planner owns the next action."""
