@@ -792,6 +792,7 @@ class SQLWriterAgent:
             guidance,
             agent_label=f"SWA-{worker_id}",
             worker_identity=(
+                f"YOU ARE: {worker_id}.\n"
                 f"You are {worker_id} in a parallel SQL writer group. "
                 "Work independently on your forked state. Your intermediate SQL executions "
                 "are local to you until the group reaches consensus."
@@ -1095,7 +1096,13 @@ def build_writer_group_chat_context(
         ],
         "chat_history": chat_history,
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    return (
+        f"YOU ARE: {worker_id}.\n"
+        f"You are speaking as {worker_id}, the representative for your current result faction.\n"
+        "Use this identity consistently in the group chat. Do not speak as another worker.\n\n"
+        "GROUP CHAT CONTEXT JSON:\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    )
 
 
 def candidate_chat_payload(candidate: WriterCandidate, preview_rows: int) -> Dict[str, Any]:
