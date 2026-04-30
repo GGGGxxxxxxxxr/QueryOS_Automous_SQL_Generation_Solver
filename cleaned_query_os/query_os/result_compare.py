@@ -81,6 +81,18 @@ def relaxed_result_match(
     if not all(len(row) == gold_width for row in gold_rows):
         return {}
 
+    if pred_width == gold_width and unique_unordered_rows_match(pred_rows, gold_rows):
+        return {
+            "cluster": "duplicate_multiplicity_only",
+            "reason": "Rows differ only by duplicate multiplicity; unique row values match.",
+            "projection": {
+                "projection_indices": list(range(pred_width)),
+                "projection_columns": list(pred_columns),
+                "projection_checked": 0,
+                "match_type": "unique_unordered",
+            },
+        }
+
     checked = 0
     identity = tuple(range(gold_width))
     for indices in permutations(range(pred_width), gold_width):
@@ -92,14 +104,23 @@ def relaxed_result_match(
         projected = project_rows(pred_rows, indices)
         exact = exact_rows_match(projected, gold_rows)
         unordered = unordered_rows_match(projected, gold_rows)
-        if not exact and not unordered:
+        unique_unordered = unique_unordered_rows_match(projected, gold_rows)
+        if not exact and not unordered and not unique_unordered:
             continue
         if pred_width > gold_width:
-            cluster = "extra_columns_only" if exact else "extra_columns_and_row_order_only"
-            reason = "Predicted output contains extra columns, but a projection matches the expected rows."
+            if unique_unordered and not exact and not unordered:
+                cluster = "extra_columns_and_duplicate_multiplicity_only"
+                reason = "After dropping extra columns, rows differ only by duplicate multiplicity."
+            else:
+                cluster = "extra_columns_only" if exact else "extra_columns_and_row_order_only"
+                reason = "Predicted output contains extra columns, but a projection matches the expected rows."
         else:
-            cluster = "column_display_order_only" if exact else "column_display_order_and_row_order_only"
-            reason = "Predicted output columns can be reordered to match the expected rows."
+            if unique_unordered and not exact and not unordered:
+                cluster = "column_display_order_and_duplicate_multiplicity_only"
+                reason = "After reordering columns, rows differ only by duplicate multiplicity."
+            else:
+                cluster = "column_display_order_only" if exact else "column_display_order_and_row_order_only"
+                reason = "Predicted output columns can be reordered to match the expected rows."
         return {
             "cluster": cluster,
             "reason": reason,
@@ -107,7 +128,7 @@ def relaxed_result_match(
                 "projection_indices": list(indices),
                 "projection_columns": [pred_columns[idx] for idx in indices],
                 "projection_checked": checked,
-                "match_type": "exact" if exact else "unordered",
+                "match_type": projection_match_type(exact, unordered, unique_unordered),
             },
         }
     return {}
@@ -119,3 +140,17 @@ def project_rows(rows: List[List[Any]], indices: tuple[int, ...]) -> List[List[A
 
 def normalize_rows_for_compare(rows: List[List[Any]]) -> List[str]:
     return [json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) for row in rows]
+
+
+def unique_unordered_rows_match(left: List[List[Any]], right: List[List[Any]]) -> bool:
+    return set(normalize_rows_for_compare(left)) == set(normalize_rows_for_compare(right))
+
+
+def projection_match_type(exact: bool, unordered: bool, unique_unordered: bool) -> str:
+    if exact:
+        return "exact"
+    if unordered:
+        return "unordered"
+    if unique_unordered:
+        return "unique_unordered"
+    return "none"
