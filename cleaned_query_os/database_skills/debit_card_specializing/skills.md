@@ -29,7 +29,7 @@ Do not use `MAX(<consumption>)` for a peak month unless the question asks for on
 
 ## Counting
 
-Choose the denominator explicitly:
+Default to row/event counting. Do not use `DISTINCT` unless the question explicitly asks for unique customers, distinct entities, or customer identities.
 
 ```sql
 COUNT(*)                       -- records, monthly rows, transactions
@@ -43,6 +43,7 @@ For percentages, numerator and denominator must use the same grain.
 - Customer segment and gas station segment are different.
 - Customer currency and gas station country are different.
 - Country/location questions usually need the gas station path.
+- For transaction-linked nationality/country wording, prefer gas station country when customer country is absent.
 - Product-description questions need the product path.
 - Transaction-date/price/amount questions should start from transactions and join outward.
 
@@ -65,7 +66,7 @@ SUBSTR(<date>, 5, 2)
 Before submission, verify:
 
 1. target grain;
-2. row count vs distinct customer count;
+2. row count first; distinct customer count only if explicitly required;
 3. consumption aggregated to the requested level;
 4. segment/currency/country mapped to the right entity;
 5. date format matches the table.
