@@ -99,6 +99,8 @@ schema_discovery:
   max_turns: 16
   max_tool_calls_per_turn: 8
   parallel_workers: 2
+  # Whole parallel SDA group watchdog. 0 disables the group watchdog.
+  parallel_timeout_seconds: 150
   read_table_summary_max_cols: 0
   trace_column_preview_limit: 0
 
@@ -106,6 +108,8 @@ sql_writer:
   max_tokens: 8192
   max_turns: 16
   parallel_workers: 2
+  # Whole initial SQL writer group watchdog. Completed workers keep going.
+  parallel_timeout_seconds: 150
   consensus:
     require_same_columns: false
   chatgroup:

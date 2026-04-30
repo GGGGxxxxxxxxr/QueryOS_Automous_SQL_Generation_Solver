@@ -202,6 +202,8 @@ class EventTracer:
             guidance = self._shorten(raw_guidance, 180)
             lines = [self._color("  SWA writer group started", "yellow", bold=True)]
             lines.append(f"    {self._color('workers', 'cyan')}: {', '.join(str(x) for x in workers)}")
+            if payload.get("timeout_seconds"):
+                lines.append(f"    {self._color('timeout', 'cyan')}: {payload.get('timeout_seconds')}s")
             if guidance and not self._repeats_planner_guidance(global_step, raw_guidance):
                 lines.append(f"    {self._color('task', 'yellow')}: {guidance}")
             return "\n".join(lines)
@@ -212,8 +214,20 @@ class EventTracer:
             guidance = self._shorten(raw_guidance, 180)
             lines = [self._color("  SDA schema group started", "cyan", bold=True)]
             lines.append(f"    {self._color('workers', 'cyan')}: {', '.join(str(x) for x in workers)}")
+            if payload.get("timeout_seconds"):
+                lines.append(f"    {self._color('timeout', 'cyan')}: {payload.get('timeout_seconds')}s")
             if guidance and not self._repeats_planner_guidance(global_step, raw_guidance):
                 lines.append(f"    {self._color('task', 'yellow')}: {guidance}")
+            return "\n".join(lines)
+
+        if event_type in {"schema_group_timeout", "writer_group_timeout"}:
+            label = "SDA schema group" if event_type == "schema_group_timeout" else "SWA writer group"
+            lines = [self._color(f"  [TIMEOUT] {label} watchdog fired", "yellow", bold=True)]
+            if payload.get("timeout_seconds") is not None:
+                lines.append(f"    {self._color('timeout', 'yellow')}: {payload.get('timeout_seconds')}s")
+            workers = payload.get("workers") or []
+            if workers:
+                lines.append(f"    {self._color('cancelled workers', 'yellow')}: {', '.join(str(x) for x in workers)}")
             return "\n".join(lines)
 
         if event_type == "schema_group_merge":
@@ -227,7 +241,13 @@ class EventTracer:
             for item in payload.get("workers") or []:
                 lines.append(
                     f"    - {item.get('worker')}: ok={item.get('ok')} "
+                    f"timeout={item.get('timed_out', False)} "
                     f"tables={item.get('table_count')} columns={item.get('column_count')}"
+                )
+            if payload.get("timed_out_workers"):
+                lines.append(
+                    f"    {self._color('timed out', 'yellow')}: "
+                    f"{', '.join(str(x) for x in payload.get('timed_out_workers') or [])}"
                 )
             return "\n".join(lines)
 

@@ -3,7 +3,8 @@ from __future__ import annotations
 import copy
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 from .llm import create_chat_completion, create_llm_backend, is_fatal_llm_error, safe_llm_error
@@ -212,6 +213,7 @@ class SchemaDiscoveryAgent:
         read_table_summary_max_cols: int = 30,
         trace_column_preview_limit: int = 8,
         parallel_workers: int = 1,
+        parallel_timeout_seconds: float = 0,
         debug: bool = False,
         tracer: Optional[EventTracer] = None,
         llm_client: Optional[Any] = None,
@@ -225,6 +227,7 @@ class SchemaDiscoveryAgent:
         self.read_table_summary_max_cols = read_table_summary_max_cols
         self.trace_column_preview_limit = trace_column_preview_limit
         self.parallel_workers = max(1, int(parallel_workers or 1))
+        self.parallel_timeout_seconds = max(0.0, float(parallel_timeout_seconds or 0))
         self.debug = debug
         self.tracer = tracer or NULL_TRACER
 
@@ -241,6 +244,7 @@ class SchemaDiscoveryAgent:
         *,
         agent_label: str,
         worker_identity: str = "",
+        cancel_event: Optional[threading.Event] = None,
     ) -> AgentReturn:
         global_step = state.step + 1
         self.tracer.emit(
@@ -273,6 +277,8 @@ class SchemaDiscoveryAgent:
 
         last_error = ""
         for turn in range(1, self.max_turns + 1):
+            if cancel_event is not None and cancel_event.is_set():
+                return self._cancelled_return(agent_label, global_step, turn)
             self.tracer.emit(
                 "worker_step_start",
                 agent_label,
@@ -308,6 +314,8 @@ class SchemaDiscoveryAgent:
                     report=last_error,
                     payload={"reason": "llm_call_failed", "fatal": is_fatal_llm_error(exc)},
                 )
+            if cancel_event is not None and cancel_event.is_set():
+                return self._cancelled_return(agent_label, global_step, turn)
             tool_calls = getattr(message, "tool_calls", None) if message is not None else None
             if not tool_calls:
                 last_error = "SDA produced no tool call"
@@ -359,6 +367,8 @@ class SchemaDiscoveryAgent:
 
             schema_updates: List[str] = []
             for tc in unique_calls[: self.max_tool_calls_per_turn]:
+                if cancel_event is not None and cancel_event.is_set():
+                    return self._cancelled_return(agent_label, global_step, turn)
                 name = tc.function.name
                 args: Dict[str, Any] = {}
                 try:
@@ -451,6 +461,24 @@ class SchemaDiscoveryAgent:
             payload={},
         )
 
+    def _cancelled_return(self, agent_label: str, global_step: int, worker_step: int) -> AgentReturn:
+        report = f"{agent_label} cancelled by parallel group watchdog."
+        self.tracer.emit(
+            "worker_finish",
+            agent_label,
+            report,
+            global_step=global_step,
+            worker_step=worker_step,
+            status="error",
+            payload={"error": report},
+        )
+        return AgentReturn(
+            agent=AgentName.SCHEMA_DISCOVERY,
+            ok=False,
+            report=report,
+            payload={"reason": "schema_worker_cancelled", "cancelled": True},
+        )
+
     def _run_parallel_group(self, state: SharedState, guidance: str, metadata: SchemaMetadataStore) -> AgentReturn:
         global_step = state.step + 1
         worker_ids = [f"schema_{idx}" for idx in range(1, self.parallel_workers + 1)]
@@ -459,30 +487,51 @@ class SchemaDiscoveryAgent:
             "SDA",
             "Schema discovery group started.",
             global_step=global_step,
-            payload={"workers": worker_ids, "guidance": guidance},
+            payload={
+                "workers": worker_ids,
+                "guidance": guidance,
+                "timeout_seconds": self.parallel_timeout_seconds,
+            },
         )
 
         worker_results: Dict[str, Tuple[AgentReturn, SharedState]] = {}
-        with ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
-            futures = {
-                pool.submit(self._run_parallel_worker, state, guidance, metadata, worker_id): worker_id
-                for worker_id in worker_ids
-            }
-            for future in as_completed(futures):
-                worker_id = futures[future]
-                try:
-                    worker_results[worker_id] = future.result()
-                except Exception as exc:
-                    err = f"{worker_id} failed unexpectedly: {safe_llm_error(exc)}"
-                    worker_results[worker_id] = (
-                        AgentReturn(
-                            agent=AgentName.SCHEMA_DISCOVERY,
-                            ok=False,
-                            report=err,
-                            payload={"reason": "schema_worker_exception", "fatal": is_fatal_llm_error(exc)},
-                        ),
-                        fork_shared_state_for_schema(state),
-                    )
+        cancel_event = threading.Event()
+        pool = ThreadPoolExecutor(max_workers=len(worker_ids))
+        futures = {
+            pool.submit(self._run_parallel_worker, state, guidance, metadata, worker_id, cancel_event): worker_id
+            for worker_id in worker_ids
+        }
+        processed_futures = set()
+        timeout_seconds = self.parallel_timeout_seconds if self.parallel_timeout_seconds > 0 else None
+        try:
+            try:
+                for future in as_completed(futures, timeout=timeout_seconds):
+                    processed_futures.add(future)
+                    worker_id = futures[future]
+                    worker_results[worker_id] = self._schema_future_result(worker_id, future, state)
+            except FuturesTimeoutError:
+                timed_out = [worker_id for future, worker_id in futures.items() if not future.done()]
+                cancel_event.set()
+                self.tracer.emit(
+                    "schema_group_timeout",
+                    "SDA",
+                    "Schema discovery group timed out; continuing with completed workers.",
+                    global_step=global_step,
+                    status="error",
+                    payload={"timeout_seconds": self.parallel_timeout_seconds, "workers": timed_out},
+                )
+
+            for future, worker_id in futures.items():
+                if future.done() and future not in processed_futures and worker_id not in worker_results:
+                    worker_results[worker_id] = self._schema_future_result(worker_id, future, state)
+
+            for future, worker_id in futures.items():
+                if worker_id in worker_results:
+                    continue
+                future.cancel()
+                worker_results[worker_id] = self._schema_timeout_result(worker_id)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         ordered_results = [worker_results[worker_id] for worker_id in worker_ids]
         worker_states = [worker_state for _, worker_state in ordered_results]
@@ -494,7 +543,11 @@ class SchemaDiscoveryAgent:
                 report,
                 global_step=global_step,
                 status="error",
-                payload={"workers": schema_worker_summaries(worker_ids, ordered_results), "tables": 0},
+                payload={
+                    "workers": schema_worker_summaries(worker_ids, ordered_results),
+                    "tables": 0,
+                    "timed_out_workers": timed_out_workers(ordered_results),
+                },
             )
             return AgentReturn(
                 agent=AgentName.SCHEMA_DISCOVERY,
@@ -504,6 +557,7 @@ class SchemaDiscoveryAgent:
                     "reason": "schema_group_empty",
                     "fatal": any(ret.payload.get("fatal") for ret, _ in ordered_results),
                     "workers": schema_worker_summaries(worker_ids, ordered_results),
+                    "timed_out_workers": timed_out_workers(ordered_results),
                 },
             )
 
@@ -524,6 +578,7 @@ class SchemaDiscoveryAgent:
                 "workers": schema_worker_summaries(worker_ids, ordered_results),
                 "tables": table_count,
                 "columns": column_count,
+                "timed_out_workers": timed_out_workers(ordered_results),
             },
         )
         return AgentReturn(
@@ -533,7 +588,41 @@ class SchemaDiscoveryAgent:
             payload={
                 "discovered_schema": state.discovered.tables,
                 "workers": schema_worker_summaries(worker_ids, ordered_results),
+                "timed_out_workers": timed_out_workers(ordered_results),
             },
+        )
+
+    def _schema_future_result(
+        self,
+        worker_id: str,
+        future: Any,
+        state: SharedState,
+    ) -> Tuple[AgentReturn, SharedState]:
+        try:
+            return future.result()
+        except Exception as exc:
+            err = f"{worker_id} failed unexpectedly: {safe_llm_error(exc)}"
+            return (
+                AgentReturn(
+                    agent=AgentName.SCHEMA_DISCOVERY,
+                    ok=False,
+                    report=err,
+                    payload={"reason": "schema_worker_exception", "fatal": is_fatal_llm_error(exc)},
+                ),
+                fork_shared_state_for_schema(state),
+            )
+
+    @staticmethod
+    def _schema_timeout_result(worker_id: str) -> Tuple[AgentReturn, SharedState]:
+        report = f"{worker_id} timed out before returning schema discovery results."
+        return (
+            AgentReturn(
+                agent=AgentName.SCHEMA_DISCOVERY,
+                ok=False,
+                report=report,
+                payload={"reason": "schema_worker_timeout", "timed_out": True, "worker": worker_id},
+            ),
+            SharedState(question="", db_path=""),
         )
 
     def _run_parallel_worker(
@@ -542,6 +631,7 @@ class SchemaDiscoveryAgent:
         guidance: str,
         metadata: SchemaMetadataStore,
         worker_id: str,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Tuple[AgentReturn, SharedState]:
         worker_state = fork_shared_state_for_schema(state)
         ret = self._run_single_worker(
@@ -554,6 +644,7 @@ class SchemaDiscoveryAgent:
                 "Work independently on your forked state. The kernel will merge all "
                 "workers' discovered schemas by union and compute confidence from agreement count."
             ),
+            cancel_event=cancel_event,
         )
         return ret, worker_state
 
@@ -948,12 +1039,21 @@ def schema_worker_summaries(
             {
                 "worker": worker_id,
                 "ok": ret.ok,
+                "timed_out": bool(ret.payload.get("timed_out")),
                 "table_count": len(worker_state.discovered.tables),
                 "column_count": sum(len(ev.columns) for ev in worker_state.discovered.tables.values()),
                 "report": ret.report,
             }
         )
     return summaries
+
+
+def timed_out_workers(ordered_results: List[Tuple[AgentReturn, SharedState]]) -> List[str]:
+    return [
+        str(ret.payload.get("worker") or "").strip()
+        for ret, _ in ordered_results
+        if ret.payload.get("timed_out") and str(ret.payload.get("worker") or "").strip()
+    ]
 
 
 def add_or_replace_columns(ev: TableEvidence, columns: List[Dict[str, Any]]) -> None:

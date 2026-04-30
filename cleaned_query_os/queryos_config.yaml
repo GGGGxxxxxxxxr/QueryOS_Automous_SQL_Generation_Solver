@@ -37,6 +37,9 @@ schema_discovery:
   # >1 enables parallel SDA workers. Schemas are merged by union and annotated
   # with numeric confidence from worker agreement.
   parallel_workers: 2
+  # Whole parallel SDA group watchdog. 0 disables the group watchdog.
+  # Completed workers are kept; unfinished workers are marked timeout/cancelled.
+  parallel_timeout_seconds: 150
 
   # Actual READ_TABLE_JSON payload sent to SDA.
   # 0 means no column cap.
@@ -52,6 +55,9 @@ sql_writer:
   max_turns: 16
   # >1 enables an internal SQL writer group. The manager still sees one SWA call.
   parallel_workers: 2
+  # Whole initial SQL writer group watchdog. 0 disables the group watchdog.
+  # Completed workers continue into consensus/chat; unfinished workers are marked timeout/cancelled.
+  parallel_timeout_seconds: 150
   consensus:
     # false: agreement/result consensus focuses on returned values; aliases may differ.
     # true: result consensus also requires identical output column names.

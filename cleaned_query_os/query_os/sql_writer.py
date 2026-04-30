@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
 from .llm import create_chat_completion, create_llm_backend, is_fatal_llm_error, safe_llm_error
@@ -117,6 +118,7 @@ class SQLWriterAgent:
         executor: Optional[SQLiteExecutor] = None,
         trace_sql_preview_rows: int = 3,
         parallel_workers: int = 1,
+        parallel_timeout_seconds: float = 0,
         chatgroup_enabled: bool = True,
         chatgroup_max_rounds: int = 2,
         consensus_require_same_columns: bool = False,
@@ -132,6 +134,7 @@ class SQLWriterAgent:
         self.executor = executor or SQLiteExecutor()
         self.trace_sql_preview_rows = trace_sql_preview_rows if trace_sql_preview_rows >= 0 else 3
         self.parallel_workers = max(1, int(parallel_workers or 1))
+        self.parallel_timeout_seconds = max(0.0, float(parallel_timeout_seconds or 0))
         self.chatgroup_enabled = bool(chatgroup_enabled)
         self.chatgroup_max_rounds = max(0, int(chatgroup_max_rounds or 0))
         self.consensus_require_same_columns = bool(consensus_require_same_columns)
@@ -155,6 +158,7 @@ class SQLWriterAgent:
         *,
         agent_label: str,
         worker_identity: str = "",
+        cancel_event: Optional[threading.Event] = None,
     ) -> AgentReturn:
         global_step = state.step + 1
         self.tracer.emit(
@@ -187,6 +191,8 @@ class SQLWriterAgent:
         last_error = ""
 
         for turn in range(1, self.max_turns + 1):
+            if cancel_event is not None and cancel_event.is_set():
+                return self._cancelled_return(agent_label, global_step, turn)
             self.tracer.emit(
                 "worker_step_start",
                 agent_label,
@@ -222,6 +228,8 @@ class SQLWriterAgent:
                     report=last_error,
                     payload={"reason": "llm_call_failed", "fatal": is_fatal_llm_error(exc)},
                 )
+            if cancel_event is not None and cancel_event.is_set():
+                return self._cancelled_return(agent_label, global_step, turn)
             tool_calls = getattr(message, "tool_calls", None) if message is not None else None
             if not tool_calls:
                 self.tracer.emit(
@@ -305,6 +313,8 @@ class SQLWriterAgent:
             )
 
             if has_report:
+                if cancel_event is not None and cancel_event.is_set():
+                    return self._cancelled_return(agent_label, global_step, turn)
                 tc, _, args = parsed_calls[0]
                 report = str(args.get("report") or "").strip()
                 self.tracer.emit(
@@ -357,6 +367,8 @@ class SQLWriterAgent:
                 )
 
             for tc, _, args in parsed_calls:
+                if cancel_event is not None and cancel_event.is_set():
+                    return self._cancelled_return(agent_label, global_step, turn)
                 sql = str(args.get("sql") or "").strip()
                 if not sql:
                     self.tracer.emit(
@@ -422,6 +434,24 @@ class SQLWriterAgent:
             },
         )
 
+    def _cancelled_return(self, agent_label: str, global_step: int, worker_step: int) -> AgentReturn:
+        report = f"{agent_label} cancelled by parallel group watchdog."
+        self.tracer.emit(
+            "worker_finish",
+            agent_label,
+            report,
+            global_step=global_step,
+            worker_step=worker_step,
+            status="error",
+            payload={"error": report},
+        )
+        return AgentReturn(
+            agent=AgentName.SQL_WRITER,
+            ok=False,
+            report=report,
+            payload={"reason": "sql_worker_cancelled", "cancelled": True},
+        )
+
     def _run_writer_group(self, state: SharedState, guidance: str) -> AgentReturn:
         global_step = state.step + 1
         worker_ids = [f"writer_{idx}" for idx in range(1, self.parallel_workers + 1)]
@@ -430,7 +460,11 @@ class SQLWriterAgent:
             "SWA",
             "SQL writer group started.",
             global_step=global_step,
-            payload={"workers": worker_ids, "guidance": guidance},
+            payload={
+                "workers": worker_ids,
+                "guidance": guidance,
+                "timeout_seconds": self.parallel_timeout_seconds,
+            },
         )
 
         candidates = self._run_initial_group_workers(state, guidance, worker_ids)
@@ -647,32 +681,73 @@ class SQLWriterAgent:
     ) -> Dict[str, WriterCandidate]:
         original_attempt_count = len(state.sql_attempts)
         candidates: Dict[str, WriterCandidate] = {}
-        with ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
-            futures = {
-                pool.submit(
-                    self._run_initial_group_worker,
-                    state,
-                    guidance,
-                    worker_id,
-                    original_attempt_count,
-                ): worker_id
-                for worker_id in worker_ids
-            }
-            for future in as_completed(futures):
-                worker_id = futures[future]
-                try:
-                    candidate = future.result()
-                except Exception as exc:
-                    err = f"{worker_id} failed unexpectedly: {safe_llm_error(exc)}"
-                    candidate = WriterCandidate(
-                        worker_id=worker_id,
-                        ok=False,
-                        fatal=is_fatal_llm_error(exc),
-                        error=err,
-                        report=err,
-                    )
-                candidates[worker_id] = candidate
+        cancel_event = threading.Event()
+        pool = ThreadPoolExecutor(max_workers=len(worker_ids))
+        futures = {
+            pool.submit(
+                self._run_initial_group_worker,
+                state,
+                guidance,
+                worker_id,
+                original_attempt_count,
+                cancel_event,
+            ): worker_id
+            for worker_id in worker_ids
+        }
+        processed_futures = set()
+        timeout_seconds = self.parallel_timeout_seconds if self.parallel_timeout_seconds > 0 else None
+        global_step = state.step + 1
+        try:
+            try:
+                for future in as_completed(futures, timeout=timeout_seconds):
+                    processed_futures.add(future)
+                    worker_id = futures[future]
+                    candidates[worker_id] = self._writer_future_result(worker_id, future)
+            except FuturesTimeoutError:
+                timed_out = [worker_id for future, worker_id in futures.items() if not future.done()]
+                cancel_event.set()
+                self.tracer.emit(
+                    "writer_group_timeout",
+                    "SWA",
+                    "SQL writer group timed out; continuing with completed workers.",
+                    global_step=global_step,
+                    status="error",
+                    payload={"timeout_seconds": self.parallel_timeout_seconds, "workers": timed_out},
+                )
+
+            for future, worker_id in futures.items():
+                if future.done() and future not in processed_futures and worker_id not in candidates:
+                    candidates[worker_id] = self._writer_future_result(worker_id, future)
+
+            for future, worker_id in futures.items():
+                if worker_id in candidates:
+                    continue
+                future.cancel()
+                candidates[worker_id] = WriterCandidate(
+                    worker_id=worker_id,
+                    ok=False,
+                    fatal=False,
+                    error=f"{worker_id} timed out before returning SQL.",
+                    report=f"{worker_id} timed out before returning SQL.",
+                    last_action="TIMEOUT",
+                )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         return {worker_id: candidates[worker_id] for worker_id in worker_ids}
+
+    @staticmethod
+    def _writer_future_result(worker_id: str, future: Any) -> WriterCandidate:
+        try:
+            return future.result()
+        except Exception as exc:
+            err = f"{worker_id} failed unexpectedly: {safe_llm_error(exc)}"
+            return WriterCandidate(
+                worker_id=worker_id,
+                ok=False,
+                fatal=is_fatal_llm_error(exc),
+                error=err,
+                report=err,
+            )
 
     def _run_initial_group_worker(
         self,
@@ -680,6 +755,7 @@ class SQLWriterAgent:
         guidance: str,
         worker_id: str,
         original_attempt_count: int,
+        cancel_event: Optional[threading.Event] = None,
     ) -> WriterCandidate:
         worker_state = fork_shared_state_for_worker(state)
         ret = self._run_single_worker(
@@ -691,6 +767,7 @@ class SQLWriterAgent:
                 "Work independently on your forked state. Your intermediate SQL executions "
                 "are local to you until the group reaches consensus."
             ),
+            cancel_event=cancel_event,
         )
         return candidate_from_worker_state(worker_id, worker_state, ret, original_attempt_count)
 

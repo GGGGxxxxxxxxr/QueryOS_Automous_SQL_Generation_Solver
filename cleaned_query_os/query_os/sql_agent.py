@@ -412,9 +412,11 @@ class QueryOS:
         schema_read_table_summary_max_cols: int = 30,
         schema_trace_column_preview_limit: int = 8,
         schema_parallel_workers: int = 1,
+        schema_parallel_timeout_seconds: float = 0,
         sql_max_tokens: int = 4096,
         sql_max_turns: int = 8,
         sql_parallel_workers: int = 1,
+        sql_parallel_timeout_seconds: float = 0,
         sql_chatgroup_enabled: bool = True,
         sql_chatgroup_max_rounds: int = 2,
         sql_consensus_require_same_columns: bool = False,
@@ -455,9 +457,11 @@ class QueryOS:
         self.schema_read_table_summary_max_cols = schema_read_table_summary_max_cols
         self.schema_trace_column_preview_limit = schema_trace_column_preview_limit
         self.schema_parallel_workers = max(1, int(schema_parallel_workers or 1))
+        self.schema_parallel_timeout_seconds = max(0.0, float(schema_parallel_timeout_seconds or 0))
         self.sql_max_tokens = sql_max_tokens
         self.sql_max_turns = sql_max_turns
         self.sql_parallel_workers = max(1, int(sql_parallel_workers or 1))
+        self.sql_parallel_timeout_seconds = max(0.0, float(sql_parallel_timeout_seconds or 0))
         self.sql_chatgroup_enabled = bool(sql_chatgroup_enabled)
         self.sql_chatgroup_max_rounds = max(0, int(sql_chatgroup_max_rounds or 0))
         self.sql_consensus_require_same_columns = bool(sql_consensus_require_same_columns)
@@ -556,6 +560,7 @@ class QueryOS:
                 read_table_summary_max_cols=self.schema_read_table_summary_max_cols,
                 trace_column_preview_limit=self.schema_trace_column_preview_limit,
                 parallel_workers=self.schema_parallel_workers,
+                parallel_timeout_seconds=self.schema_parallel_timeout_seconds,
                 debug=self.debug,
                 tracer=tracer,
                 llm_client=llm_backend,
@@ -570,6 +575,7 @@ class QueryOS:
                 executor=executor,
                 trace_sql_preview_rows=sql_preview_rows,
                 parallel_workers=self.sql_parallel_workers,
+                parallel_timeout_seconds=self.sql_parallel_timeout_seconds,
                 chatgroup_enabled=self.sql_chatgroup_enabled,
                 chatgroup_max_rounds=self.sql_chatgroup_max_rounds,
                 consensus_require_same_columns=self.sql_consensus_require_same_columns,
