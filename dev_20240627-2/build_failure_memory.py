@@ -29,6 +29,13 @@ def main() -> int:
         )
     )
     parser.add_argument("--dev-json", default=str(SCRIPT_DIR / "dev.json"))
+    parser.add_argument(
+        "--dataset-root",
+        help=(
+            "Dataset root containing dev_databases/. Defaults to the parent directory of --dev-json. "
+            "Use this when the question JSON lives outside the database directory tree."
+        ),
+    )
     parser.add_argument("--config", default=str(CLEANED_QUERYOS_ROOT / "queryos_config.yaml"))
     parser.add_argument("--results-dir", default=str(SCRIPT_DIR / "traces" / "failure_memory_runs"))
     parser.add_argument("--output-jsonl", default=str(SCRIPT_DIR / "failure_memory" / "error_bank.jsonl"))
@@ -61,7 +68,7 @@ def main() -> int:
     args = parser.parse_args()
 
     dev_json = Path(args.dev_json).expanduser().resolve()
-    dataset_root = dev_json.parent
+    dataset_root = Path(args.dataset_root).expanduser().resolve() if args.dataset_root else dev_json.parent
     results_dir = Path(args.results_dir).expanduser().resolve()
     output_jsonl = Path(args.output_jsonl).expanduser().resolve()
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -85,6 +92,8 @@ def main() -> int:
     completed_failure_ids = load_existing_failure_ids(output_jsonl) if resume else set()
 
     print(f"[failure-memory] selected examples: {len(samples)}")
+    print(f"[failure-memory] dev json: {dev_json}")
+    print(f"[failure-memory] dataset root: {dataset_root}")
     print(f"[failure-memory] results dir: {results_dir}")
     print(f"[failure-memory] output jsonl: {output_jsonl}")
     print(f"[failure-memory] outer workers: {max(1, args.workers)}")
