@@ -254,6 +254,11 @@ class SchemaDiscoveryAgent:
             global_step=global_step,
             payload={"guidance": guidance},
         )
+        skills_block = (
+            f"DATABASE SKILLS FOR {state.db_id}:\n{state.database_skills}\n\n"
+            if state.database_skills
+            else ""
+        )
         messages: List[Dict[str, Any]] = [
             {
                 "role": "system",
@@ -268,6 +273,7 @@ class SchemaDiscoveryAgent:
                     (f"WORKER IDENTITY:\n{worker_identity}\n\n" if worker_identity else "") +
                     f"USER QUESTION:\n{state.question}\n\n"
                     f"EXTERNAL KNOWLEDGE:\n{state.external_knowledge}\n\n"
+                    f"{skills_block}"
                     f"MANAGER GUIDANCE:\n{guidance}\n\n"
                     f"CURRENT discovered_schema:\n{format_discovered_schema_compact(state)}\n\n"
                     "Call a tool now."
@@ -1017,6 +1023,7 @@ def fork_shared_state_for_schema(state: SharedState) -> SharedState:
         db_path=state.db_path,
         db_id=state.db_id,
         external_knowledge=state.external_knowledge,
+        database_skills=state.database_skills,
         metadata_display=state.metadata_display,
         workflow_status=state.workflow_status,
         discovered=copy.deepcopy(state.discovered),
