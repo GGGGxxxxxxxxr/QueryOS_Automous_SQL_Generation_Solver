@@ -50,15 +50,14 @@ SQL_WRITER_CHAT_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "AGREE",
-            "description": "Agree that a target worker's current SQL should become the group consensus.",
+            "name": "CHAT",
+            "description": "Post a message defending your faction or challenging another faction.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "target_worker": {"type": "string"},
-                    "reason": {"type": "string"},
+                    "message": {"type": "string"},
                 },
-                "required": ["target_worker", "reason"],
+                "required": ["message"],
                 "additionalProperties": False,
             },
         },
@@ -66,15 +65,15 @@ SQL_WRITER_CHAT_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "REVISE",
-            "description": "Replace your own current SQL with a revised read-only SQLite query.",
+            "name": "QUIT",
+            "description": "Leave the group chat because another faction is more convincing.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "sql": {"type": "string"},
                     "reason": {"type": "string"},
+                    "convinced_by_signature": {"type": "string"},
                 },
-                "required": ["sql", "reason"],
+                "required": ["reason"],
                 "additionalProperties": False,
             },
         },
@@ -93,7 +92,6 @@ class WriterCandidate:
     fatal: bool = False
     error: str = ""
     last_action: str = ""
-    agreement_target: str = ""
     reason: str = ""
     history: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -485,140 +483,119 @@ class SQLWriterAgent:
                 reason="Initial writer candidates disagreed and chatgroup is disabled.",
             )
 
+        factions = build_result_factions(
+            candidates,
+            require_columns=self.consensus_require_same_columns,
+            preview_rows=self.trace_sql_preview_rows,
+        )
+        active_representatives = {faction["signature"]: faction["representative_worker"] for faction in factions}
         chat_history: List[Dict[str, Any]] = []
         for round_idx in range(1, self.chatgroup_max_rounds + 1):
+            active_factions = [faction for faction in factions if faction["signature"] in active_representatives]
+            if len(active_factions) <= 1:
+                winner = active_factions[0] if active_factions else factions[0]
+                winner_candidate = candidates[str(winner["representative_worker"])]
+                return self._commit_group_candidate(
+                    state,
+                    winner_candidate,
+                    candidates=candidates,
+                    mode=f"group_chat_last_faction_round_{round_idx}",
+                    report=f"SQL writer group chat winner is {winner_candidate.worker_id}.",
+                    chat_history=chat_history,
+                )
+
             self.tracer.emit(
                 "writer_group_round",
                 "SWA",
-                "SQL writer group chat round.",
+                "SQL writer faction group chat round.",
                 global_step=global_step,
                 worker_step=round_idx,
-                payload={"objective": "Reach agreement on one worker's current SQL or revise your own SQL."},
+                payload={
+                    "objective": "Representatives chat or quit until one result faction remains.",
+                    "factions": faction_trace_summaries(active_factions),
+                },
             )
             actions = self._collect_chat_actions(
                 state=state,
                 guidance=guidance,
                 candidates=candidates,
+                factions=active_factions,
                 chat_history=chat_history,
                 round_idx=round_idx,
             )
-            revised_workers = []
-            round_log = {"round": round_idx, "actions": []}
+            round_log = {
+                "round": round_idx,
+                "active_factions": faction_trace_summaries(active_factions),
+                "messages": [],
+            }
             for worker_id, action in actions.items():
                 candidate = candidates[worker_id]
                 action_name = str(action.get("action") or "").upper()
                 reason = str(action.get("reason") or "").strip()
-                if action_name == "REVISE":
-                    sql = str(action.get("sql") or "").strip()
-                    if not sql:
-                        action_name = "AGREE"
-                        reason = reason or "Revision omitted SQL; treating as no agreement."
-                    else:
-                        revised_workers.append(worker_id)
-                        exec_result = self.executor.execute(state.db_path, sql)
-                        candidate.version += 1
-                        candidate.current_sql = sql
-                        candidate.current_result = exec_result
-                        candidate.ok = bool(exec_result.get("ok"))
-                        candidate.error = str(exec_result.get("error") or "")
-                        candidate.report = reason
-                        candidate.last_action = "REVISE"
-                        candidate.agreement_target = ""
-                        candidate.reason = reason
-                        candidate.history.append(
-                            {
-                                "round": round_idx,
-                                "action": "REVISE",
-                                "sql": sql,
-                                "result": compact_exec_result(exec_result),
-                                "reason": reason,
-                            }
-                        )
-                        self.tracer.emit(
-                            "writer_group_action",
-                            "SWA",
-                            "SQL writer revised its candidate.",
-                            global_step=global_step,
-                            worker_step=round_idx,
-                            status="ok" if exec_result.get("ok") else "error",
-                            payload={
-                                "writer": worker_id,
-                                "action": "REVISE",
-                                "reason": reason,
-                                "version": candidate.version,
-                            },
-                        )
-                        self.tracer.emit(
-                            "tool_result",
-                            f"SWA-{worker_id}",
-                            "Executed revised SQL.",
-                            global_step=global_step,
-                            worker_step=round_idx,
-                            tool="SQLITE_EXEC",
-                            status="ok" if exec_result.get("ok") else "error",
-                            payload=sql_exec_payload(sql, exec_result, preview_rows=self.trace_sql_preview_rows),
-                        )
-                        round_log["actions"].append(
-                            {
-                                "worker": worker_id,
-                                "action": "REVISE",
-                                "reason": reason,
-                                "version": candidate.version,
-                                "result": compact_exec_result(exec_result),
-                            }
-                        )
-                        continue
+                signature = faction_signature_for_worker(active_factions, worker_id)
+                message = str(action.get("message") or reason).strip()
+                if action_name == "QUIT" and len(active_representatives) > 1:
+                    active_representatives.pop(signature, None)
+                    message = reason or "I am convinced by another faction and quit."
+                elif action_name == "QUIT":
+                    action_name = "CHAT"
+                    message = "I am the last active representative, so I cannot quit."
+                elif action_name != "CHAT":
+                    action_name = "CHAT"
+                    message = message or "I remain unconvinced and continue to defend my faction."
 
-                target_worker = str(action.get("target_worker") or "").strip()
-                if target_worker not in candidates:
-                    target_worker = worker_id
-                    reason = reason or "Invalid agreement target; defaulted to self."
-                candidate.last_action = "AGREE"
-                candidate.agreement_target = target_worker
-                candidate.reason = reason
+                candidate.last_action = action_name
+                candidate.reason = message
+                candidate.history.append(
+                    {
+                        "round": round_idx,
+                        "action": action_name,
+                        "message": message,
+                        "signature": signature,
+                        "convinced_by_signature": str(action.get("convinced_by_signature") or "").strip(),
+                    }
+                )
                 self.tracer.emit(
                     "writer_group_action",
                     "SWA",
-                    "SQL writer agreed with a candidate.",
+                    "SQL writer representative posted to group chat.",
                     global_step=global_step,
                     worker_step=round_idx,
                     status="ok",
                     payload={
                         "writer": worker_id,
-                        "action": "AGREE",
-                        "target_worker": target_worker,
-                        "reason": reason,
-                        "version": candidates[target_worker].version,
+                        "action": action_name,
+                        "signature": signature,
+                        "reason": message,
+                        "convinced_by_signature": str(action.get("convinced_by_signature") or "").strip(),
+                        "version": candidate.version,
                     },
                 )
-                round_log["actions"].append(
+                round_log["messages"].append(
                     {
                         "worker": worker_id,
-                        "action": "AGREE",
-                        "target_worker": target_worker,
-                        "target_version": candidates[target_worker].version,
-                        "reason": reason,
+                        "signature": signature,
+                        "action": action_name,
+                        "message": message,
+                        "convinced_by_signature": str(action.get("convinced_by_signature") or "").strip(),
                     }
                 )
 
             chat_history.append(round_log)
-            if revised_workers:
-                # A revised current SQL invalidates all prior agreement signatures.
-                for candidate in candidates.values():
-                    candidate.agreement_target = ""
-                continue
 
-            agreement_consensus = self._find_agreement_consensus(candidates)
-            if agreement_consensus is not None:
+            active_factions = [faction for faction in factions if faction["signature"] in active_representatives]
+            if len(active_factions) == 1:
+                winner_candidate = candidates[str(active_factions[0]["representative_worker"])]
                 return self._commit_group_candidate(
                     state,
-                    agreement_consensus,
+                    winner_candidate,
                     candidates=candidates,
-                    mode=f"chatgroup_agreement_round_{round_idx}",
+                    mode=f"group_chat_winner_round_{round_idx}",
                     report=(
-                        "SQL writer group reached agreement on "
-                        f"{agreement_consensus.worker_id}'s current SQL."
+                        "SQL writer group chat reached one remaining result faction: "
+                        f"{winner_candidate.worker_id}."
                     ),
+                    chat_history=chat_history,
                 )
 
         result_consensus = self._find_result_consensus(candidates)
@@ -628,13 +605,18 @@ class SQLWriterAgent:
                 result_consensus,
                 candidates=candidates,
                 mode="post_chat_result_consensus",
-                report="SQL writer group did not unanimously agree, but final execution results are consistent.",
+                report=(
+                    "SQL writer group chat did not leave one remaining faction, "
+                    "but final execution results are consistent."
+                ),
+                chat_history=chat_history,
             )
         return self._writer_group_divergence(
             global_step=global_step,
             candidates=candidates,
             rounds=self.chatgroup_max_rounds,
             reason="Writer group exhausted chat rounds without consensus.",
+            chat_history=chat_history,
         )
 
     def _run_initial_group_workers(
@@ -698,22 +680,25 @@ class SQLWriterAgent:
         state: SharedState,
         guidance: str,
         candidates: Dict[str, WriterCandidate],
+        factions: List[Dict[str, Any]],
         chat_history: List[Dict[str, Any]],
         round_idx: int,
     ) -> Dict[str, Dict[str, Any]]:
         actions: Dict[str, Dict[str, Any]] = {}
-        with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+        representative_workers = [str(faction["representative_worker"]) for faction in factions]
+        with ThreadPoolExecutor(max_workers=max(1, len(representative_workers))) as pool:
             futures = {
                 pool.submit(
                     self._call_chat_worker,
                     state,
                     guidance,
                     candidates,
+                    factions,
                     chat_history,
                     round_idx,
                     worker_id,
                 ): worker_id
-                for worker_id in candidates
+                for worker_id in representative_workers
             }
             for future in as_completed(futures):
                 worker_id = futures[future]
@@ -722,18 +707,18 @@ class SQLWriterAgent:
                 except Exception as exc:
                     err = f"Chat action failed for {worker_id}: {safe_llm_error(exc)}"
                     actions[worker_id] = {
-                        "action": "AGREE",
-                        "target_worker": worker_id,
-                        "reason": err,
+                        "action": "CHAT",
+                        "message": err,
                         "fatal": is_fatal_llm_error(exc),
                     }
-        return {worker_id: actions[worker_id] for worker_id in candidates}
+        return {worker_id: actions[worker_id] for worker_id in representative_workers}
 
     def _call_chat_worker(
         self,
         state: SharedState,
         guidance: str,
         candidates: Dict[str, WriterCandidate],
+        factions: List[Dict[str, Any]],
         chat_history: List[Dict[str, Any]],
         round_idx: int,
         worker_id: str,
@@ -746,6 +731,7 @@ class SQLWriterAgent:
                     state=state,
                     guidance=guidance,
                     candidates=candidates,
+                    factions=factions,
                     chat_history=chat_history,
                     round_idx=round_idx,
                     worker_id=worker_id,
@@ -757,9 +743,8 @@ class SQLWriterAgent:
         tool_calls = getattr(message, "tool_calls", None) if message is not None else None
         if not tool_calls or len(tool_calls) != 1:
             return {
-                "action": "AGREE",
-                "target_worker": worker_id,
-                "reason": "No clear chat action was emitted; keeping my current SQL.",
+                "action": "CHAT",
+                "message": "No clear chat action was emitted; I remain in the discussion.",
             }
         tc = tool_calls[0]
         name = str(tc.function.name or "").upper()
@@ -767,26 +752,23 @@ class SQLWriterAgent:
             args = json.loads(tc.function.arguments or "{}")
         except Exception as exc:
             return {
-                "action": "AGREE",
-                "target_worker": worker_id,
-                "reason": f"Invalid chat action JSON; keeping my current SQL. {exc}",
+                "action": "CHAT",
+                "message": f"Invalid chat action JSON; I remain in the discussion. {exc}",
             }
-        if name == "REVISE":
+        if name == "CHAT":
             return {
-                "action": "REVISE",
-                "sql": str(args.get("sql") or "").strip(),
-                "reason": str(args.get("reason") or "").strip(),
+                "action": "CHAT",
+                "message": str(args.get("message") or "").strip(),
             }
-        if name == "AGREE":
+        if name == "QUIT":
             return {
-                "action": "AGREE",
-                "target_worker": str(args.get("target_worker") or "").strip(),
+                "action": "QUIT",
                 "reason": str(args.get("reason") or "").strip(),
+                "convinced_by_signature": str(args.get("convinced_by_signature") or "").strip(),
             }
         return {
-            "action": "AGREE",
-            "target_worker": worker_id,
-            "reason": f"Unknown chat action {name}; keeping my current SQL.",
+            "action": "CHAT",
+            "message": f"Unknown chat action {name}; I remain in the discussion.",
         }
 
     def _find_result_consensus(self, candidates: Dict[str, WriterCandidate]) -> Optional[WriterCandidate]:
@@ -805,19 +787,6 @@ class SQLWriterAgent:
             return viable[0]
         return None
 
-    @staticmethod
-    def _find_agreement_consensus(candidates: Dict[str, WriterCandidate]) -> Optional[WriterCandidate]:
-        targets = [candidate.agreement_target for candidate in candidates.values()]
-        if not targets or any(not target for target in targets):
-            return None
-        if len(set(targets)) != 1:
-            return None
-        target = targets[0]
-        candidate = candidates.get(target)
-        if candidate and candidate.current_sql and candidate.result_ok():
-            return candidate
-        return None
-
     def _commit_group_candidate(
         self,
         state: SharedState,
@@ -826,6 +795,7 @@ class SQLWriterAgent:
         candidates: Optional[Dict[str, WriterCandidate]] = None,
         mode: str,
         report: str,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
     ) -> AgentReturn:
         global_step = state.step + 1
         state.sql_attempts.append(
@@ -847,6 +817,7 @@ class SQLWriterAgent:
                 "sql": candidate.current_sql,
                 "rows": len(candidate.result_rows()),
                 "columns": candidate.result_columns(),
+                "chat_rounds": len(chat_history or []),
             },
         )
         return AgentReturn(
@@ -858,6 +829,7 @@ class SQLWriterAgent:
                 "writer_group_mode": mode,
                 "consensus_worker": candidate.worker_id,
                 "writer_group": candidate_payloads(candidates or {candidate.worker_id: candidate}),
+                "writer_group_chat_history": chat_history or [],
             },
         )
 
@@ -868,6 +840,7 @@ class SQLWriterAgent:
         candidates: Dict[str, WriterCandidate],
         rounds: int,
         reason: str,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
     ) -> AgentReturn:
         self.tracer.emit(
             "writer_group_divergence",
@@ -875,7 +848,12 @@ class SQLWriterAgent:
             reason,
             global_step=global_step,
             status="error",
-            payload={"reason": reason, "rounds": rounds, "candidates": candidate_trace_summaries(candidates)},
+            payload={
+                "reason": reason,
+                "rounds": rounds,
+                "chat_rounds": len(chat_history or []),
+                "candidates": candidate_trace_summaries(candidates),
+            },
         )
         return AgentReturn(
             agent=AgentName.SQL_WRITER,
@@ -884,6 +862,7 @@ class SQLWriterAgent:
             payload={
                 "reason": "writer_group_divergence",
                 "writer_group": candidate_payloads(candidates),
+                "writer_group_chat_history": chat_history or [],
             },
         )
 
@@ -979,6 +958,7 @@ def build_writer_group_chat_context(
     state: SharedState,
     guidance: str,
     candidates: Dict[str, WriterCandidate],
+    factions: List[Dict[str, Any]],
     chat_history: List[Dict[str, Any]],
     round_idx: int,
     worker_id: str,
@@ -987,15 +967,18 @@ def build_writer_group_chat_context(
     payload = {
         "worker_id": worker_id,
         "round": round_idx,
-        "objective": "Reach consensus on one worker's current SQL candidate.",
+        "objective": "Group chat among result-faction representatives. Chat or quit until one faction remains.",
         "question": state.question,
         "external_knowledge": state.external_knowledge,
         "manager_guidance": guidance,
         "discovered_schema": json.loads(format_discovered_schema(state)),
+        "your_result_signature": faction_signature_for_worker(factions, worker_id),
+        "result_factions": factions,
         "rules": [
-            "Only current SQL candidates are eligible for agreement.",
-            "If any worker revises SQL, the runtime executes it and old agreements are invalidated.",
-            "AGREE target_worker should be one of the current worker ids.",
+            "You cannot revise SQL in this phase.",
+            "Use CHAT to defend your result or challenge another faction.",
+            "Use QUIT only when another faction has convinced you that your result should not win.",
+            "The runtime declares the winner when only one representative remains.",
         ],
         "current_candidates": [
             candidate_chat_payload(candidate, preview_rows=preview_rows)
@@ -1051,7 +1034,6 @@ def candidate_payloads(candidates: Dict[str, WriterCandidate]) -> Dict[str, Any]
             "error": candidate.error,
             "report": candidate.report,
             "last_action": candidate.last_action,
-            "agreement_target": candidate.agreement_target,
             "result": compact_exec_result(candidate.current_result),
             "history": candidate.history,
         }
@@ -1071,6 +1053,61 @@ def candidate_trace_summaries(candidates: Dict[str, WriterCandidate]) -> List[Di
         }
         for candidate in candidates.values()
     ]
+
+
+def build_result_factions(
+    candidates: Dict[str, WriterCandidate],
+    *,
+    require_columns: bool,
+    preview_rows: int,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[WriterCandidate]] = {}
+    for candidate in candidates.values():
+        if not candidate.current_sql or not candidate.result_ok():
+            continue
+        signature = result_signature(candidate.current_result, require_columns=require_columns)
+        grouped.setdefault(signature, []).append(candidate)
+
+    factions = []
+    for signature, members in grouped.items():
+        members = sorted(members, key=lambda item: item.worker_id)
+        representative = members[0]
+        factions.append(
+            {
+                "signature": signature,
+                "representative_worker": representative.worker_id,
+                "supporting_workers": [member.worker_id for member in members],
+                "support_count": len(members),
+                "candidate": candidate_chat_payload(representative, preview_rows=preview_rows),
+            }
+        )
+    factions.sort(key=lambda item: (-int(item["support_count"]), str(item["representative_worker"])))
+    return factions
+
+
+def faction_trace_summaries(factions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    summaries = []
+    for faction in factions:
+        candidate = faction.get("candidate") or {}
+        execution = candidate.get("execution") or {}
+        summaries.append(
+            {
+                "signature": faction.get("signature"),
+                "representative": faction.get("representative_worker"),
+                "supporting_workers": faction.get("supporting_workers"),
+                "support_count": faction.get("support_count"),
+                "rows": execution.get("row_count"),
+                "columns": execution.get("columns"),
+            }
+        )
+    return summaries
+
+
+def faction_signature_for_worker(factions: List[Dict[str, Any]], worker_id: str) -> str:
+    for faction in factions:
+        if worker_id == faction.get("representative_worker") or worker_id in (faction.get("supporting_workers") or []):
+            return str(faction.get("signature") or "")
+    return ""
 
 
 def result_signature(exec_result: Dict[str, Any], require_columns: bool = False) -> str:

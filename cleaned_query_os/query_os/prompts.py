@@ -131,23 +131,27 @@ If discovered_schema is insufficient, report exactly what is missing instead of 
 
 
 def build_sql_writer_chat_system_prompt() -> str:
-    return """You are one SQL writer inside a QueryOS SQL writer group.
+    return """You are one SQL writer representative inside a QueryOS SQL writer group chat.
 
-Your group has already produced SQL candidates. You are now in a worker chat barrier.
-Your job is to inspect the current candidates, SQLite execution results, question, evidence, and schema, then either agree with one current candidate or revise your own SQL.
+The runtime has clustered valid SQL candidates by execution result. Each unique result has one representative in this chat.
+Your job is to defend your faction's SQL/result, challenge other factions, or quit if another faction convinces you.
 
 Allowed actions:
-- AGREE {"target_worker": "...", "reason": "..."}: agree that target worker's current SQL should be the group consensus.
-- REVISE {"sql": "...", "reason": "..."}: replace your own current SQL with a revised SQL. The runtime will immediately execute it before the next chat round.
+- CHAT {"message": "..."}: post a concise argument, defense, or challenge to the group.
+- QUIT {"reason": "...", "convinced_by_signature": "..."}: leave the chat because another faction is more convincing.
 
 Rules:
-- Agree only with a worker's current SQL, not a historical SQL.
-- If you revise, produce a complete read-only SQLite query.
+- You cannot revise SQL in this phase. You can only argue or quit.
+- Stay in the chat if you still believe your faction could be correct.
+- Quit if another faction clearly better matches the question, evidence, output shape, or execution result.
+- Defend with concrete evidence: SELECT contract, required filters, join grain, formula/date logic, and execution preview.
+- Challenge only concrete issues. Do not challenge because another SQL is stylistically different.
+- The final winner is the last remaining faction representative.
 - Use the execution results as evidence. Empty results, SQL errors, or wrong output shape are blocking concerns. NULL values are blocking only when the question/evidence requires valid or non-NULL values.
 - Evidence constraints are hard constraints. If evidence maps multiple phrases to column=value constraints, they are usually all required unless the question explicitly says either/or.
 - Do not aggregate a numeric measure unless the question explicitly asks for a total, sum, count, average, maximum, or minimum.
-- Check common SQL shape mistakes before agreeing: extra/missing SELECT columns, missing or excessive DISTINCT, COUNT vs COUNT(DISTINCT), scalar vs rowset mismatch, unnecessary LIMIT 1, wrong GROUP BY grain, wrong ORDER BY direction/field, wrong join path, and percentage denominator/scaling errors.
-- Keep the reason short and specific."""
+- Check common SQL shape mistakes before deciding whether to stay or quit: extra/missing SELECT columns, missing or excessive DISTINCT, COUNT vs COUNT(DISTINCT), scalar vs rowset mismatch, unnecessary LIMIT 1, wrong GROUP BY grain, wrong ORDER BY direction/field, wrong join path, and percentage denominator/scaling errors.
+- Keep messages short, specific, and addressed to the group."""
 
 
 def build_sql_validator_system_prompt() -> str:

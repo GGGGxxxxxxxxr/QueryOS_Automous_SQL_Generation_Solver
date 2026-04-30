@@ -231,21 +231,32 @@ class EventTracer:
             objective = str(payload.get("objective") or "")
             if objective:
                 lines.append(f"    {self._color('objective', 'cyan')}: {objective}")
+            factions = payload.get("factions") or []
+            for item in factions:
+                sig = str(item.get("signature") or "")[:10]
+                lines.append(
+                    f"    - {self._color(str(item.get('representative') or ''), 'yellow')}: "
+                    f"support={item.get('support_count')} sig={sig} rows={item.get('rows')}"
+                )
             return "\n".join(lines)
 
         if event_type == "writer_group_action":
             writer = str(payload.get("writer") or agent)
             action = str(payload.get("action") or "")
-            status_color = "green" if action == "AGREE" else "yellow"
+            status_color = "red" if action == "QUIT" else "cyan"
             lines = [
                 f"    {self._color(writer, 'yellow', bold=True)} "
                 f"{self._color(action, status_color, bold=True)}"
             ]
-            target = payload.get("target_worker")
-            if target:
-                lines.append(f"      {self._color('target', 'cyan')}: {target}")
+            signature = str(payload.get("signature") or "")
+            if signature:
+                lines.append(f"      {self._color('signature', 'cyan')}: {signature[:16]}")
+            convinced_by = str(payload.get("convinced_by_signature") or "")
+            if convinced_by:
+                lines.append(f"      {self._color('convinced by', 'cyan')}: {convinced_by[:16]}")
             if payload.get("reason"):
-                lines.append(f"      {self._color('reason', 'yellow')}: {payload.get('reason')}")
+                label = "message" if action == "CHAT" else "reason"
+                lines.append(f"      {self._color(label, 'yellow')}: {payload.get('reason')}")
             if payload.get("version") is not None:
                 lines.append(f"      {self._color('version', 'cyan')}: {payload.get('version')}")
             return "\n".join(lines)
@@ -258,6 +269,8 @@ class EventTracer:
                 lines.append(f"    {self._color('winner', 'cyan')}: {target}")
             if mode:
                 lines.append(f"    {self._color('mode', 'cyan')}: {mode}")
+            if payload.get("chat_rounds") is not None:
+                lines.append(f"    {self._color('chat rounds', 'cyan')}: {payload.get('chat_rounds')}")
             if payload.get("sql"):
                 lines.append(f"    {self._color('SQL', 'yellow', bold=True)}")
                 for sql_line in self._format_sql_block(str(payload.get("sql") or "")):
@@ -268,6 +281,8 @@ class EventTracer:
             lines = [self._color("  [ERR] SWA writer group did not reach consensus", "red", bold=True)]
             if payload.get("rounds") is not None:
                 lines.append(f"    {self._color('rounds', 'yellow')}: {payload.get('rounds')}")
+            if payload.get("chat_rounds") is not None:
+                lines.append(f"    {self._color('chat rounds', 'yellow')}: {payload.get('chat_rounds')}")
             if payload.get("reason"):
                 lines.append(f"    {self._color('reason', 'yellow')}: {payload.get('reason')}")
             candidates = payload.get("candidates") or []
