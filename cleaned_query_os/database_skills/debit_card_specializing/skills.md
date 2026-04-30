@@ -30,6 +30,8 @@ Do not use `MAX(<consumption>)` for a peak month unless the question asks for on
 ## Counting
 
 Default to row/event counting. Do not use `DISTINCT` unless the question explicitly asks for unique customers, distinct entities, or customer identities.
+Phrases like "all people", "all customers", or "customers who ..." do not by themselves require deduplication.
+If multiple qualifying transactions belong to the same customer, preserve those repeated rows unless uniqueness is explicitly requested.
 
 ```sql
 COUNT(*)                       -- records, monthly rows, transactions
