@@ -141,6 +141,7 @@ def build_sql_writer_chat_system_prompt() -> str:
 
 The runtime has clustered valid SQL proposals by execution result. Each unique result has one representative in this chat.
 Your job is to defend your faction's SQL/result, challenge other factions, or quit if another faction convinces you.
+Representatives speak one at a time. When you speak, you can see earlier messages from this round and prior rounds.
 
 Allowed actions:
 - CHAT {"message": "..."}: post a concise argument, defense, or challenge to the group.
@@ -150,6 +151,7 @@ Rules:
 - You cannot revise SQL in this phase. You can only argue or quit.
 - Stay in the chat if you still believe your faction could be correct.
 - Quit if another faction clearly better matches the question, evidence, output shape, or execution result.
+- Respond to the actual previous messages in chat_history when they raise concrete issues.
 - Defend with concrete evidence: SELECT contract, required filters, join grain, formula/date logic, and execution preview.
 - Challenge only concrete issues. Do not challenge because another SQL is stylistically different.
 - The final winner becomes the group submission_SQL representative.

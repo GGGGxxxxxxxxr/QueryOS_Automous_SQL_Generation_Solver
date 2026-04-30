@@ -511,28 +511,46 @@ class SQLWriterAgent:
                 global_step=global_step,
                 worker_step=round_idx,
                 payload={
-                    "objective": "Representatives chat or quit until one result faction remains.",
+                    "objective": "Representatives speak one at a time, then chat or quit until one result faction remains.",
                     "factions": faction_trace_summaries(active_factions),
                 },
-            )
-            actions = self._collect_chat_actions(
-                state=state,
-                guidance=guidance,
-                candidates=candidates,
-                factions=active_factions,
-                chat_history=chat_history,
-                round_idx=round_idx,
             )
             round_log = {
                 "round": round_idx,
                 "active_factions": faction_trace_summaries(active_factions),
                 "messages": [],
             }
-            for worker_id, action in actions.items():
+            for faction in active_factions:
+                worker_id = str(faction["representative_worker"])
+                signature = str(faction["signature"])
+                if signature not in active_representatives:
+                    continue
+                current_active_factions = [
+                    item for item in factions if item["signature"] in active_representatives
+                ]
+                if len(current_active_factions) <= 1:
+                    break
+                visible_history = chat_history + [round_log]
+                try:
+                    action = self._call_chat_worker(
+                        state=state,
+                        guidance=guidance,
+                        candidates=candidates,
+                        factions=current_active_factions,
+                        chat_history=visible_history,
+                        round_idx=round_idx,
+                        worker_id=worker_id,
+                    )
+                except Exception as exc:
+                    action = {
+                        "action": "CHAT",
+                        "message": f"Chat action failed for {worker_id}: {safe_llm_error(exc)}",
+                        "fatal": is_fatal_llm_error(exc),
+                    }
                 candidate = candidates[worker_id]
                 action_name = str(action.get("action") or "").upper()
                 reason = str(action.get("reason") or "").strip()
-                signature = faction_signature_for_worker(active_factions, worker_id)
+                signature = faction_signature_for_worker(current_active_factions, worker_id)
                 message = str(action.get("message") or reason).strip()
                 if action_name == "QUIT" and len(active_representatives) > 1:
                     active_representatives.pop(signature, None)
@@ -673,45 +691,6 @@ class SQLWriterAgent:
             ),
         )
         return candidate_from_worker_state(worker_id, worker_state, ret, original_attempt_count)
-
-    def _collect_chat_actions(
-        self,
-        *,
-        state: SharedState,
-        guidance: str,
-        candidates: Dict[str, WriterCandidate],
-        factions: List[Dict[str, Any]],
-        chat_history: List[Dict[str, Any]],
-        round_idx: int,
-    ) -> Dict[str, Dict[str, Any]]:
-        actions: Dict[str, Dict[str, Any]] = {}
-        representative_workers = [str(faction["representative_worker"]) for faction in factions]
-        with ThreadPoolExecutor(max_workers=max(1, len(representative_workers))) as pool:
-            futures = {
-                pool.submit(
-                    self._call_chat_worker,
-                    state,
-                    guidance,
-                    candidates,
-                    factions,
-                    chat_history,
-                    round_idx,
-                    worker_id,
-                ): worker_id
-                for worker_id in representative_workers
-            }
-            for future in as_completed(futures):
-                worker_id = futures[future]
-                try:
-                    actions[worker_id] = future.result()
-                except Exception as exc:
-                    err = f"Chat action failed for {worker_id}: {safe_llm_error(exc)}"
-                    actions[worker_id] = {
-                        "action": "CHAT",
-                        "message": err,
-                        "fatal": is_fatal_llm_error(exc),
-                    }
-        return {worker_id: actions[worker_id] for worker_id in representative_workers}
 
     def _call_chat_worker(
         self,
@@ -967,7 +946,10 @@ def build_writer_group_chat_context(
     payload = {
         "worker_id": worker_id,
         "round": round_idx,
-        "objective": "Group chat among result-faction representatives. Chat or quit until one faction remains.",
+        "objective": (
+            "Sequential group chat among result-faction representatives. "
+            "Each representative can see earlier messages, then chat or quit until one faction remains."
+        ),
         "question": state.question,
         "external_knowledge": state.external_knowledge,
         "manager_guidance": guidance,
@@ -976,6 +958,7 @@ def build_writer_group_chat_context(
         "result_factions": factions,
         "rules": [
             "You cannot revise SQL in this phase.",
+            "Representatives speak one at a time; chat_history may include earlier messages from this same round.",
             "Use CHAT to defend your result or challenge another faction.",
             "Use QUIT only when another faction has convinced you that your result should not win.",
             "The runtime declares the winner when only one representative remains.",
