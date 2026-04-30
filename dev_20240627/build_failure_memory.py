@@ -19,13 +19,14 @@ if str(CLEANED_QUERYOS_ROOT) not in sys.path:
 from query_os.config import cfg_get, load_yaml_config, pick  # noqa: E402
 from query_os.llm import create_chat_completion, create_llm_backend, safe_llm_error  # noqa: E402
 from query_os.sql_agent import QueryOS, result_to_dict  # noqa: E402
+from recheck_true_errors import recheck_record  # noqa: E402
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Run QueryOS over dev.json, compare against each golden SQL, and build a JSONL "
-            "failure-memory file with one LLM-written error_reason per mismatch."
+            "Run QueryOS over dev.json, compare against each golden SQL, apply relaxed full-result "
+            "rechecks, and build a JSONL failure-memory file for true errors."
         )
     )
     parser.add_argument("--dev-json", default=str(SCRIPT_DIR / "dev.json"))
@@ -43,7 +44,7 @@ def main() -> int:
     parser.add_argument("--base-url", dest="base_url")
     parser.add_argument("--provider", choices=["openai", "vllm"], help="LLM provider backend.")
     parser.add_argument("--model", help="Override QueryOS model from YAML.")
-    parser.add_argument("--reason-model", help="Model used to summarize mismatch reasons. Defaults to QueryOS model.")
+    parser.add_argument("--reason-model", help="Model used with --llm-reason. Defaults to QueryOS model.")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--validation", choices=["off", "auto"])
     parser.add_argument("--limit", type=int, help="Maximum number of selected dev examples to run.")
@@ -63,7 +64,13 @@ def main() -> int:
     parser.add_argument("--live-trace", action="store_true", help="Show QueryOS live trace while batch runs.")
     parser.add_argument("--no-resume", action="store_true", help="Do not skip existing output records/results.")
     parser.add_argument("--overwrite-results", action="store_true", help="Regenerate q*_result.json even if present.")
-    parser.add_argument("--no-llm-reason", action="store_true", help="Use deterministic error_reason text instead of an LLM.")
+    parser.add_argument("--llm-reason", action="store_true", help="Use an LLM to summarize true-error reasons.")
+    parser.add_argument("--no-llm-reason", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-relaxed-recheck", action="store_true", help="Disable full SQL re-execution relaxed matching.")
+    parser.add_argument("--relaxed-output-jsonl", help="Optional JSONL for mismatches filtered out by relaxed recheck.")
+    parser.add_argument("--recheck-max-rows", type=int, default=2000, help="Rows to fetch per SQL during relaxed recheck.")
+    parser.add_argument("--recheck-timeout", type=int, default=60, help="Seconds per SQL during relaxed recheck.")
+    parser.add_argument("--recheck-max-projection-combinations", type=int, default=20000)
     parser.add_argument("--stop-on-error", action="store_true", help="Stop the batch when one example raises an exception.")
     args = parser.parse_args()
 
@@ -71,8 +78,11 @@ def main() -> int:
     dataset_root = Path(args.dataset_root).expanduser().resolve() if args.dataset_root else dev_json.parent
     results_dir = Path(args.results_dir).expanduser().resolve()
     output_jsonl = Path(args.output_jsonl).expanduser().resolve()
+    relaxed_output_jsonl = Path(args.relaxed_output_jsonl).expanduser().resolve() if args.relaxed_output_jsonl else None
     results_dir.mkdir(parents=True, exist_ok=True)
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    if relaxed_output_jsonl:
+        relaxed_output_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
     config = load_yaml_config(args.config)
     reason_model = (
@@ -90,19 +100,25 @@ def main() -> int:
 
     resume = not args.no_resume
     completed_failure_ids = load_existing_failure_ids(output_jsonl) if resume else set()
+    if resume and relaxed_output_jsonl:
+        completed_failure_ids.update(load_existing_failure_ids(relaxed_output_jsonl))
 
     print(f"[failure-memory] selected examples: {len(samples)}")
     print(f"[failure-memory] dev json: {dev_json}")
     print(f"[failure-memory] dataset root: {dataset_root}")
     print(f"[failure-memory] results dir: {results_dir}")
     print(f"[failure-memory] output jsonl: {output_jsonl}")
+    if relaxed_output_jsonl:
+        print(f"[failure-memory] relaxed output jsonl: {relaxed_output_jsonl}")
+    print(f"[failure-memory] relaxed recheck: {not args.no_relaxed_recheck}")
+    print(f"[failure-memory] llm reason: {bool(args.llm_reason and not args.no_llm_reason)}")
     print(f"[failure-memory] outer workers: {max(1, args.workers)}")
     print(f"[failure-memory] inner schema workers: {int(cfg_get(config, 'schema_discovery.parallel_workers', 1))}")
     print(f"[failure-memory] inner sql writers: {int(cfg_get(config, 'sql_writer.parallel_workers', 1))}")
     if args.live_trace and args.workers > 1:
         print("[failure-memory] warning: --live-trace with --workers > 1 can interleave terminal logs")
 
-    counters = {"written": 0, "skipped": 0, "matched": 0, "failed": 0}
+    counters = {"written": 0, "skipped": 0, "matched": 0, "relaxed_matched": 0, "failed": 0}
     print_lock = threading.Lock()
     write_lock = threading.Lock()
     workers = max(1, int(args.workers or 1))
@@ -115,6 +131,7 @@ def main() -> int:
                 dataset_root=dataset_root,
                 results_dir=results_dir,
                 output_jsonl=output_jsonl,
+                relaxed_output_jsonl=relaxed_output_jsonl,
                 sample=sample,
                 idx=idx,
                 total=len(samples),
@@ -135,6 +152,7 @@ def main() -> int:
                     dataset_root=dataset_root,
                     results_dir=results_dir,
                     output_jsonl=output_jsonl,
+                    relaxed_output_jsonl=relaxed_output_jsonl,
                     sample=sample,
                     idx=idx,
                     total=len(samples),
@@ -152,7 +170,8 @@ def main() -> int:
 
     print(
         "[failure-memory] done | "
-        f"matched={counters['matched']} mismatched_or_error={counters['failed']} "
+        f"matched={counters['matched']} relaxed_filtered={counters['relaxed_matched']} "
+        f"mismatched_or_error={counters['failed']} "
         f"written={counters['written']} skipped={counters['skipped']}"
     )
     return 0
@@ -217,6 +236,7 @@ def process_sample(
     dataset_root: Path,
     results_dir: Path,
     output_jsonl: Path,
+    relaxed_output_jsonl: Optional[Path],
     sample: Dict[str, Any],
     idx: int,
     total: int,
@@ -264,9 +284,43 @@ def process_sample(
             log(print_lock, f"[{idx}/{total}] q{question_id} match=true")
             status = "matched"
         else:
-            if args.no_llm_reason:
-                error_reason = deterministic_error_reason(result_doc)
-            else:
+            relaxed_recheck = None
+            if not args.no_relaxed_recheck:
+                relaxed_recheck = recheck_record(
+                    record={
+                        "question_id": question_id,
+                        "db_id": db_id,
+                        "predicted_sql": result_doc.get("final_sql", ""),
+                        "gold_sql": sample.get("SQL", ""),
+                    },
+                    dataset_root=dataset_root,
+                    max_rows=args.recheck_max_rows,
+                    timeout=args.recheck_timeout,
+                    preview_rows=10,
+                    max_projection_combinations=args.recheck_max_projection_combinations,
+                )
+                if not relaxed_recheck.get("true_error"):
+                    record = build_failure_record(
+                        sample=sample,
+                        result_doc=result_doc,
+                        error_reason=deterministic_error_reason(result_doc, relaxed_recheck),
+                        result_path=result_path,
+                        trace_path=trace_path,
+                    )
+                    record["relaxed_recheck"] = relaxed_recheck
+                    if relaxed_output_jsonl:
+                        append_jsonl(relaxed_output_jsonl, record, lock=write_lock)
+                    log(
+                        print_lock,
+                        f"[{idx}/{total}] q{question_id} relaxed_non_error "
+                        f"cluster={relaxed_recheck.get('cluster')}",
+                    )
+                    status = "relaxed_matched"
+                    if args.sleep > 0:
+                        time.sleep(args.sleep)
+                    return status
+
+            if args.llm_reason and not args.no_llm_reason:
                 router_config = cfg_get(config, "llm_router", {})
                 if not isinstance(router_config, dict):
                     router_config = {}
@@ -280,6 +334,8 @@ def process_sample(
                     timeout=cfg_get(config, "llm_timeout_seconds", None),
                 )
                 error_reason = summarize_error_reason(reason_client, reason_model, sample, result_doc)
+            else:
+                error_reason = deterministic_error_reason(result_doc, relaxed_recheck)
 
             record = build_failure_record(
                 sample=sample,
@@ -288,8 +344,11 @@ def process_sample(
                 result_path=result_path,
                 trace_path=trace_path,
             )
+            if relaxed_recheck:
+                record["relaxed_recheck"] = relaxed_recheck
             append_jsonl(output_jsonl, record, lock=write_lock)
-            log(print_lock, f"[{idx}/{total}] q{question_id} match=false | wrote error_reason")
+            cluster_text = f" cluster={relaxed_recheck.get('cluster')}" if relaxed_recheck else ""
+            log(print_lock, f"[{idx}/{total}] q{question_id} true_error{cluster_text} | wrote failure")
             status = "written"
 
     except KeyboardInterrupt:
@@ -327,6 +386,8 @@ def update_counters(counters: Dict[str, int], status: str) -> None:
         counters["matched"] += 1
     elif status == "skipped":
         counters["skipped"] += 1
+    elif status == "relaxed_matched":
+        counters["relaxed_matched"] += 1
     elif status == "written":
         counters["written"] += 1
         counters["failed"] += 1
@@ -448,15 +509,21 @@ def summarize_error_reason(
     return " ".join(content.split())
 
 
-def deterministic_error_reason(result_doc: Dict[str, Any]) -> str:
+def deterministic_error_reason(result_doc: Dict[str, Any], relaxed_recheck: Optional[Dict[str, Any]] = None) -> str:
     comparison = result_doc.get("gold_comparison") or {}
-    return (
+    base = (
         "The predicted SQL result does not match the golden SQL result. "
         f"Predicted row count is {comparison.get('predicted_row_count')} and gold row count is "
         f"{comparison.get('gold_row_count')}; predicted columns are {comparison.get('predicted_columns')} "
         f"and gold columns are {comparison.get('gold_columns')}. "
-        "Inspect the predicted SQL and golden SQL to identify the semantic mismatch."
     )
+    if relaxed_recheck:
+        return (
+            base
+            + f"Relaxed full-result recheck cluster: {relaxed_recheck.get('cluster')}; "
+            + f"reason: {relaxed_recheck.get('reason')}."
+        )
+    return base + "Inspect the predicted SQL and golden SQL to identify the semantic mismatch."
 
 
 def build_failure_record(
