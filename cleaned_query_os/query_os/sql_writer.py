@@ -432,7 +432,67 @@ class SQLWriterAgent:
                 else:
                     repeated_exec_count = 1
                     last_exec_signature = exec_signature
-                if repeated_exec_count >= 2:
+                if repeated_exec_count > 2:
+                    if exec_result.get("ok"):
+                        report = (
+                            "SQL writer auto-submitted after repeating the same or equivalent "
+                            f"SQL result {repeated_exec_count} times."
+                        )
+                        self.tracer.emit(
+                            "worker_finish",
+                            agent_label,
+                            report,
+                            global_step=global_step,
+                            worker_step=turn,
+                            status="ok",
+                            payload={
+                                "sql": last_sql,
+                                "repeated_exec_count": repeated_exec_count,
+                                "reason": "duplicate_result_auto_submit",
+                            },
+                        )
+                        return AgentReturn(
+                            agent=AgentName.SQL_WRITER,
+                            ok=True,
+                            report=report,
+                            payload={
+                                "final_sql": last_sql,
+                                "sqlite_exec_count": sqlite_exec_count,
+                                "reason": "duplicate_result_auto_submit",
+                                "repeated_exec_count": repeated_exec_count,
+                            },
+                        )
+                    report = (
+                        "SQL writer stopped after repeating the same SQL error "
+                        f"{repeated_exec_count} times."
+                    )
+                    self.tracer.emit(
+                        "worker_finish",
+                        agent_label,
+                        report,
+                        global_step=global_step,
+                        worker_step=turn,
+                        status="error",
+                        payload={
+                            "sql": last_sql,
+                            "error": last_error,
+                            "repeated_exec_count": repeated_exec_count,
+                            "reason": "duplicate_error_stop",
+                        },
+                    )
+                    return AgentReturn(
+                        agent=AgentName.SQL_WRITER,
+                        ok=False,
+                        report=report,
+                        payload={
+                            "last_sql": last_sql,
+                            "sqlite_exec_count": sqlite_exec_count,
+                            "last_error": last_error,
+                            "reason": "duplicate_error_stop",
+                            "repeated_exec_count": repeated_exec_count,
+                        },
+                    )
+                if repeated_exec_count == 2:
                     notice = (
                         "NOTICE: You have executed a duplicated or equivalent SQL result "
                         f"{repeated_exec_count} times in a row. If this SQL already answers "
