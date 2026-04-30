@@ -29,7 +29,8 @@ Do not use `MAX(<consumption>)` for a peak month unless the question asks for on
 
 ## Counting
 
-Default to row/event counting. Do not use `DISTINCT` unless the question explicitly asks for unique customers, distinct entities, or customer identities.
+Default to row/event counting. Do not abuse `DISTINCT`.
+Use `DISTINCT` only when the question uses words like unique, distinct, different, individual, or explicitly asks for customer identities.
 Phrases like "all people", "all customers", or "customers who ..." do not by themselves require deduplication.
 If multiple qualifying transactions belong to the same customer, preserve those repeated rows unless uniqueness is explicitly requested.
 
@@ -39,6 +40,10 @@ COUNT(DISTINCT <customer_id>)  -- unique customers only
 ```
 
 For percentages, numerator and denominator must use the same grain.
+
+## Numeric Output
+
+Do not use `ROUND()` unless the question explicitly asks for a precision, decimal places, or formatted percentage.
 
 ## Entity Mapping
 
