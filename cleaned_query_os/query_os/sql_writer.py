@@ -1096,6 +1096,8 @@ def build_writer_group_chat_context(
             "Do not repeat an argument already made in chat_history unless you add new evidence.",
             "Do not refer to yourself in third person, and do not speak as another worker.",
             "If another faction convinces you, use QUIT instead of CHAT.",
+            "If you feel your SQL/result is weaker, incomplete, or less suitable than another faction, immediately use QUIT.",
+            "Do not use CHAT to say another faction is clearer, better, or more direct while staying in the chat; that must be a QUIT reason.",
             "QUIT is not silent: write a natural-language first-person reason, like QUIT(reason='My SQL is not good because ...').",
             "Use QUIT only when another faction has convinced you that your result should not win.",
             "The runtime declares the winner when only one representative remains.",
@@ -1111,8 +1113,9 @@ def build_writer_group_chat_context(
         f"You are speaking as {worker_id}, the representative for your current result faction.\n"
         "Use this identity internally, but do not introduce yourself in the message; the log already shows your worker id. "
         "Write like a concise coworker: 1-3 short first-person sentences, no formal debate speech, no repeated points. "
-        "Do not speak as another worker. If I am convinced by another faction, I should call QUIT "
-        "with a natural-language reason, e.g. QUIT(reason='My SQL is not good because ...').\n\n"
+        "Do not speak as another worker. If I feel another faction is clearer, better, or more direct, "
+        "I must call QUIT with that as my natural-language reason instead of sending CHAT, "
+        "e.g. QUIT(reason='My SQL is not good because ...').\n\n"
         "GROUP CHAT CONTEXT JSON:\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )

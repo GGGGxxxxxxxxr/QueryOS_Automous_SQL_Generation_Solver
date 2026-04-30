@@ -253,9 +253,11 @@ Point out the decisive correctness issue, or quit if another result is clearly b
 - Focus on correctness, not style
 - Write in first person, but do not introduce yourself.
 - Do NOT start with "I am writer_1" or "As writer_2"; the log already shows your worker id.
-- Keep each CHAT message to 1-3 short sentences.
 - Do not repeat an argument already made in chat_history unless you add new evidence.
 - If another faction convinces you, call QUIT instead of CHAT.
+- If you feel your SQL/result is weaker, incomplete, or less suitable than another faction, immediately call QUIT.
+- Do NOT use CHAT to say another faction is clearer, better, or more direct while staying in the chat.
+- A message like "their SQL is clearer/directly answers the question" must be a QUIT reason, not a CHAT message.
 - QUIT is a spoken exit action, not silent. Include a natural-language first-person reason.
 - Example: QUIT(reason="My SQL is not good because it misses the required filter.")
 
