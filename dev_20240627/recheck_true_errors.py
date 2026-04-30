@@ -21,6 +21,7 @@ CLEANED_QUERYOS_ROOT = REPO_ROOT / "cleaned_query_os"
 if str(CLEANED_QUERYOS_ROOT) not in sys.path:
     sys.path.insert(0, str(CLEANED_QUERYOS_ROOT))
 
+from query_os.result_compare import compare_sql_execution_results, result_rows_all_null  # noqa: E402
 from query_os.sqlite_executor import WRITE_ACTIONS  # noqa: E402
 
 
@@ -258,15 +259,25 @@ def recheck_record(
         "gold_preview": gold.get("rows", [])[:preview_rows],
     }
 
-    if not predicted["ok"]:
-        return true_cluster(base, "predicted_execution_error", "Predicted SQL failed during re-execution.")
     if not gold["ok"]:
         return true_cluster(base, "gold_execution_error", "Gold SQL failed during re-execution.")
-    if predicted.get("truncated") or gold.get("truncated"):
+    if gold.get("truncated"):
+        return true_cluster(base, "recheck_row_limit_reached", "Recheck hit max row limit, so relaxed comparison is unsafe.")
+
+    gold_rows = gold["rows"]
+    if result_rows_all_null(gold_rows):
+        return relaxed_cluster(
+            base,
+            "reference_result_all_null_ignored",
+            "Reference SQL returned only NULL values; this sample is ignored for failure counting.",
+        )
+
+    if not predicted["ok"]:
+        return true_cluster(base, "predicted_execution_error", "Predicted SQL failed during re-execution.")
+    if predicted.get("truncated"):
         return true_cluster(base, "recheck_row_limit_reached", "Recheck hit max row limit, so relaxed comparison is unsafe.")
 
     pred_rows = predicted["rows"]
-    gold_rows = gold["rows"]
     gold_ordered = has_order_by(gold_sql)
     percent_context = has_percent_context(record, predicted["columns"], gold["columns"])
     base["percent_context"] = percent_context
@@ -353,6 +364,31 @@ def recheck_record(
                 projection,
                 details=percent_payload(),
             )
+
+    distinct_diagnostic = distinct_counterfactual(
+        db_path=db_path,
+        predicted_sql=predicted_sql,
+        gold_sql=gold_sql,
+        gold=gold,
+        predicted=predicted,
+        max_rows=max_rows,
+        timeout=timeout,
+        max_projection_combinations=max_projection_combinations,
+    )
+    if distinct_diagnostic:
+        if distinct_diagnostic["true_error"]:
+            return true_cluster(
+                base,
+                distinct_diagnostic["cluster"],
+                distinct_diagnostic["reason"],
+                details=distinct_diagnostic,
+            )
+        return relaxed_cluster(
+            base,
+            distinct_diagnostic["cluster"],
+            distinct_diagnostic["reason"],
+            details=distinct_diagnostic,
+        )
 
     if len(pred_rows) != len(gold_rows):
         return true_cluster(base, "row_count_mismatch", "Full row counts differ after re-execution.")
@@ -565,8 +601,109 @@ def percent_payload() -> Dict[str, Any]:
     return {"scale_equivalence": "0-1_fraction_vs_0-100_percent"}
 
 
-def true_cluster(base: Dict[str, Any], cluster: str, reason: str) -> Dict[str, Any]:
-    return {**base, "true_error": True, "cluster": cluster, "reason": reason}
+def distinct_counterfactual(
+    *,
+    db_path: Path,
+    predicted_sql: str,
+    gold_sql: str,
+    gold: Dict[str, Any],
+    predicted: Dict[str, Any],
+    max_rows: int,
+    timeout: int,
+    max_projection_combinations: int,
+) -> Optional[Dict[str, Any]]:
+    if has_distinct(predicted_sql):
+        variant_sql = remove_distinct(predicted_sql)
+        if variant_sql != predicted_sql.strip():
+            variant = execute_sql(db_path, variant_sql, max_rows=max_rows, timeout=timeout)
+            if variant["ok"] and not variant.get("truncated"):
+                comparison = compare_sql_execution_results(
+                    execution_for_compare(variant),
+                    execution_for_compare(gold),
+                    relaxed=True,
+                    max_projection_permutations=max_projection_combinations,
+                )
+                if comparison.get("match"):
+                    return {
+                        "true_error": True,
+                        "cluster": "unnecessary_distinct_in_predicted_sql",
+                        "reason": "Removing DISTINCT from predicted SQL makes the result match the reference.",
+                        "distinct_counterfactual": {
+                            "side": "predicted",
+                            "variant_sql": variant_sql,
+                            "variant_columns": variant.get("columns", []),
+                            "variant_row_count": len(variant.get("rows", [])),
+                            "comparison": comparison,
+                        },
+                    }
+
+    if has_distinct(gold_sql):
+        variant_sql = remove_distinct(gold_sql)
+        if variant_sql != gold_sql.strip():
+            variant = execute_sql(db_path, variant_sql, max_rows=max_rows, timeout=timeout)
+            if variant["ok"] and not variant.get("truncated"):
+                comparison = compare_sql_execution_results(
+                    execution_for_compare(predicted),
+                    execution_for_compare(variant),
+                    relaxed=True,
+                    max_projection_permutations=max_projection_combinations,
+                )
+                if comparison.get("match"):
+                    return {
+                        "true_error": False,
+                        "cluster": "reference_distinct_artifact",
+                        "reason": "Removing DISTINCT from reference SQL makes the predicted result match.",
+                        "distinct_counterfactual": {
+                            "side": "reference",
+                            "variant_sql": variant_sql,
+                            "variant_columns": variant.get("columns", []),
+                            "variant_row_count": len(variant.get("rows", [])),
+                            "comparison": comparison,
+                        },
+                    }
+    return None
+
+
+def execution_for_compare(execution: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ok": bool(execution.get("ok")),
+        "result": {
+            "columns": execution.get("columns", []),
+            "rows": execution.get("rows", []),
+        },
+        "error": execution.get("error", ""),
+    }
+
+
+def has_distinct(sql: str) -> bool:
+    return bool(
+        re.search(r"\bselect\s+distinct\b", sql or "", flags=re.IGNORECASE)
+        or re.search(r"\bcount\s*\(\s*distinct\b", sql or "", flags=re.IGNORECASE)
+    )
+
+
+def remove_distinct(sql: str) -> str:
+    stripped = sql.strip()
+    stripped = re.sub(r"\bselect\s+distinct\b", "SELECT", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(
+        r"\bcount\s*\(\s*distinct\s+([^)]+)\)",
+        r"COUNT(\1)",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    return stripped
+
+
+def true_cluster(
+    base: Dict[str, Any],
+    cluster: str,
+    reason: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = {**base, "true_error": True, "cluster": cluster, "reason": reason}
+    if details:
+        payload.update(details)
+    return payload
 
 
 def relaxed_cluster(

@@ -20,7 +20,7 @@ if str(CLEANED_QUERYOS_ROOT) not in sys.path:
 
 from query_os.config import cfg_get, load_yaml_config, pick  # noqa: E402
 from query_os.llm import create_chat_completion, create_llm_backend, safe_llm_error  # noqa: E402
-from query_os.result_compare import compare_sql_execution_results  # noqa: E402
+from query_os.result_compare import compare_sql_execution_results, result_rows_all_null  # noqa: E402
 from query_os.sql_agent import QueryOS, result_to_dict  # noqa: E402
 from recheck_true_errors import recheck_record  # noqa: E402
 
@@ -297,6 +297,29 @@ def process_sample(
                 encoding="utf-8",
             )
 
+        all_null_reference = reference_result_all_null(result_doc)
+        if all_null_reference:
+            relaxed_recheck = {
+                "true_error": False,
+                "cluster": "reference_result_all_null_ignored",
+                "reason": "Reference SQL returned only NULL values; this sample is ignored for failure counting.",
+            }
+            if relaxed_output_jsonl:
+                record = build_failure_record(
+                    sample=sample,
+                    result_doc=result_doc,
+                    error_reason=relaxed_recheck["reason"],
+                    result_path=result_path,
+                    trace_path=trace_path,
+                )
+                record["relaxed_recheck"] = relaxed_recheck
+                append_jsonl(relaxed_output_jsonl, record, lock=write_lock)
+            log(print_lock, f"[{idx}/{total}] q{question_id} relaxed_non_error cluster=reference_result_all_null_ignored")
+            status = "relaxed_matched"
+            if args.sleep > 0:
+                time.sleep(args.sleep)
+            return status
+
         if result_doc.get("gold_match") is True:
             log(print_lock, f"[{idx}/{total}] q{question_id} match=true")
             status = "matched"
@@ -430,6 +453,14 @@ def refresh_result_comparison(result_doc: Dict[str, Any]) -> None:
     comparison = compare_sql_execution_results(predicted_result, gold_result)
     result_doc["gold_comparison"] = comparison
     result_doc["gold_match"] = bool(comparison.get("match"))
+
+
+def reference_result_all_null(result_doc: Dict[str, Any]) -> bool:
+    gold_result = result_doc.get("gold_result")
+    if not isinstance(gold_result, dict) or not gold_result.get("ok"):
+        return False
+    gold_body = gold_result.get("result") or {}
+    return result_rows_all_null(gold_body.get("rows") or [])
 
 
 def log(lock: threading.Lock, message: str) -> None:

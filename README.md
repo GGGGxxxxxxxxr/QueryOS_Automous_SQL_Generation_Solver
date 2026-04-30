@@ -1,10 +1,10 @@
 # QueryOS Autonomous SQL Generation Solver
 
-QueryOS is a cleaned, self-contained SQL generation agent for SQLite databases.
-It is designed as a small agent operating system for text-to-SQL: a manager owns
-the global workflow, specialized workers run on forked state, shared memory records
-what the system has learned, and validation gates prevent the planner from
-finishing too early.
+QueryOS is a self-contained SQL generation agent for SQLite databases.
+The main idea is simple: treat text-to-SQL as a small operating system rather
+than a single prompt. A manager controls the workflow, specialized workers run on
+forked state, shared memory keeps the useful discoveries, and execution feedback
+keeps the system grounded.
 
 The cleaned implementation lives in [`cleaned_query_os/`](cleaned_query_os/).
 The archived raw implementation is preserved in
@@ -27,7 +27,7 @@ QueryOS is built around a few core ideas:
   language feedback. The planner still decides whether to retry, ask another
   worker, or finish.
 - **Observable execution**: the CLI prints a readable live workflow trace, SQL
-  previews, shared-state updates, validation results, and optional golden SQL
+  previews, shared-state updates, validation results, and optional reference SQL
   comparisons.
 - **Local-model friendly**: QueryOS supports hosted OpenAI models and separate
   OpenAI-compatible vLLM backends, including routing across multiple local model
@@ -87,6 +87,27 @@ global step and decides what to do.
 Parallelism is internal to a worker group. The manager dispatches one logical
 worker call, while the group may fork several workers, synchronize, and then
 merge or commit one clean update back into shared state.
+
+## Evaluation Philosophy
+
+QueryOS reports benchmark comparisons, but it does not pretend every benchmark
+reference is ground truth.
+
+When a benchmark is not factually grounded and is known to have imperfections,
+tailoring a solver toward exact reference agreement is not science. It is fitting
+the solver to the model or pipeline that synthesized the benchmark.
+
+The evaluation layer is therefore deliberately split:
+
+- **Exact execution match**: useful for leaderboard-style comparability.
+- **Relaxed result comparison**: filters out cases such as harmless row ordering,
+  auxiliary output columns, duplicate-row multiplicity artifacts, and percentage
+  scale conventions when the underlying answer is effectively the same.
+- **True-error mining**: keeps the remaining mismatches for diagnosis, failure
+  memory, and database-level skills.
+
+Reference SQL is a measuring instrument, not the definition of correctness.
+QueryOS optimizes for SQL reasoning, not benchmark artifact matching.
 
 ## Parallel Workers
 
@@ -151,41 +172,34 @@ each writer explores, executes SQL, and reports a candidate
         v
 bounded writer chatgroup
         |
-        +--> AGREE(target_worker)
-        |       worker accepts another worker's current SQL
+        +--> CHAT
+        |       representative explains why its result should stand
         |
-        +--> REVISE(sql)
-        |       worker replaces its own SQL; QueryOS executes it immediately
+        +--> QUIT(reason)
+        |       representative leaves after accepting another faction
         |
         v
-if every writer agrees on the same target: commit agreement consensus
+if one result faction remains: commit that faction
 else if final result signatures match: commit result consensus
-else: return divergence to manager
+else: ask the manager to select a submission_SQL or take another action
 ```
 
-The chatgroup is deliberately not a free-form debate transcript. Each worker
-must take one concrete action:
-
-- `AGREE(target_worker)`: choose one current SQL candidate as the group answer.
-- `REVISE(sql)`: replace its own candidate with a new read-only SQLite query.
-
-This gives QueryOS a clean synchronization point. A revised SQL is not trusted
-because it sounds plausible; it is executed immediately, stored as that worker's
-new candidate, and only then can the group agree on it.
+The chatgroup is a bounded argument between result factions. Representatives can
+defend their own SQL or quit with a short reason if another faction has convinced
+them. QueryOS logs the discussion, but it still commits only executable SQL.
 
 The group commits a SQL only under one of these conditions:
 
 - **Single viable candidate**: only one worker produced executable SQL.
 - **Result consensus**: all viable workers produced the same execution result
   signature.
-- **Agreement consensus**: after chat, every worker agreed on the same target
-  worker's current executable SQL.
+- **Chat consensus**: after chat, one result faction remains.
 - **Post-chat result consensus**: the writers did not unanimously agree, but
   their final executable results are consistent.
 
-If none of those conditions holds, QueryOS does not silently pick a winner. The
-writer group reports divergence back to the manager, and the planner can decide
-whether to retry, ask for more schema, or change strategy.
+If none of those conditions holds, QueryOS returns the unresolved candidates to
+the manager. The manager can select one existing `submission_SQL`, retry, ask for
+more schema, or change strategy.
 
 ## Repository Layout
 
@@ -202,9 +216,6 @@ whether to retry, ask for more schema, or change strategy.
 │   └── build_table_description_json.py
 └── raw_query_os_original/         # archived original files
 ```
-
-Large benchmark assets are intentionally not committed: SQLite files, CSV files,
-benchmark JSON, generated traces, and failure-memory outputs are ignored by git.
 
 ## Install
 
@@ -236,7 +247,7 @@ query-os \
   --question "How many accounts who have region in Prague are eligible for loans?"
 ```
 
-With golden SQL comparison:
+With reference SQL comparison:
 
 ```bash
 query-os \
@@ -332,9 +343,10 @@ The router is most useful when QueryOS is already concurrent, for example with
 ## Batch Failure Memory
 
 `dev_20240627/build_failure_memory.py` runs QueryOS over benchmark samples,
-compares each predicted result with golden SQL, and stores mismatch cases as an
-error bank. Each failure receives one unified natural-language error reason from
-the configured model.
+compares each predicted result with reference SQL, applies the relaxed
+full-result recheck, and stores the remaining true-error cases as an error bank.
+LLM-written error reasons are optional; deterministic mismatch summaries are the
+default.
 
 ```bash
 cd dev_20240627
@@ -353,13 +365,6 @@ python build_failure_memory.py \
   --provider vllm \
   --workers 2 \
   --sleep 0.2
-```
-
-Generated outputs are ignored by git:
-
-```text
-dev_20240627/failure_memory/
-dev_20240627/traces/
 ```
 
 ## Config Highlights
@@ -400,4 +405,3 @@ trace:
 - Parallel schema workers merge by union and expose only numeric `confidence`.
 - Parallel writer workers operate on forked state; only the consensus result is
   committed to shared global state.
-- Benchmark datasets are local artifacts and should not be committed directly.

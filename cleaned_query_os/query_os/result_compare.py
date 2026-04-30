@@ -21,17 +21,23 @@ def compare_sql_execution_results(
 
     exact = exact_rows_match(pred_rows, gold_rows)
     unordered = unordered_rows_match(pred_rows, gold_rows)
-    relaxed_payload = (
-        relaxed_result_match(
+    gold_all_null = result_rows_all_null(gold_rows)
+    if relaxed and gold_all_null:
+        relaxed_payload = {
+            "cluster": "reference_result_all_null_ignored",
+            "reason": "Reference SQL returned only NULL values; this comparison is ignored.",
+            "projection": {},
+        }
+    elif relaxed:
+        relaxed_payload = relaxed_result_match(
             pred_rows=pred_rows,
             gold_rows=gold_rows,
             pred_columns=pred_columns,
             gold_columns=gold_columns,
             max_projection_permutations=max_projection_permutations,
         )
-        if relaxed
-        else {}
-    )
+    else:
+        relaxed_payload = {}
     predicted_ok = bool(predicted.get("ok"))
     gold_ok = bool(gold.get("ok"))
     relaxed_ok = bool(predicted_ok and gold_ok and relaxed_payload)
@@ -144,6 +150,10 @@ def normalize_rows_for_compare(rows: List[List[Any]]) -> List[str]:
 
 def unique_unordered_rows_match(left: List[List[Any]], right: List[List[Any]]) -> bool:
     return set(normalize_rows_for_compare(left)) == set(normalize_rows_for_compare(right))
+
+
+def result_rows_all_null(rows: List[List[Any]]) -> bool:
+    return bool(rows) and all(all(cell is None for cell in row) for row in rows)
 
 
 def projection_match_type(exact: bool, unordered: bool, unique_unordered: bool) -> str:
