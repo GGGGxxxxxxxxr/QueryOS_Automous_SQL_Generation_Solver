@@ -26,12 +26,13 @@ GROUP BY <customer_id>
 ```
 
 Do not use `MAX(<consumption>)` for a peak month unless the question asks for one customer's maximum monthly value.
+Rank or compare consumption only after aggregating to the requested grain.
 
 ## Counting
 
 Default to row/event counting. Do not abuse `DISTINCT`.
 Use `DISTINCT` only when the question uses words like unique, distinct, different, individual, or explicitly asks for customer identities.
-Phrases like "all people", "all customers", or "customers who ..." do not by themselves require deduplication.
+Customer wording does not automatically mean unique customer counting.
 If multiple qualifying transactions belong to the same customer, preserve those repeated rows unless uniqueness is explicitly requested.
 
 ```sql
@@ -52,6 +53,7 @@ Do not use `ROUND()` unless the question explicitly asks for a precision, decima
 - Country/location questions usually need the gas station path.
 - In this DB, customer nationality/country is treated as the country of the gas station where the customer made the relevant transaction.
 - Product-description questions need the product path.
+- Product-description lists should preserve repeated transaction rows unless uniqueness is explicitly requested.
 - Transaction-date/price/amount questions should start from transactions and join outward.
 
 ## Dates
@@ -76,4 +78,5 @@ Before submission, verify:
 2. row count first; distinct customer count only if explicitly required;
 3. consumption aggregated to the requested level;
 4. segment/currency/country mapped to the right entity;
-5. date format matches the table.
+5. date format matches the table;
+6. comparison/ranking outputs keep enough numeric context when the question asks for values.
