@@ -330,6 +330,13 @@ class EventTracer:
                 return f"    planned tools: {', '.join(str(x) for x in tools)}"
             return "    planned tools: none"
 
+        if event_type == "worker_notice":
+            notice = self._shorten(str(payload.get("notice") or ""), 220)
+            lines = [self._color("    [NOTICE] worker guidance appended", "yellow", bold=True)]
+            if notice:
+                lines.append(f"      {self._color('notice', 'yellow')}: {notice}")
+            return "\n".join(lines)
+
         if event_type == "llm_call":
             provider = payload.get("provider")
             endpoint = payload.get("endpoint")

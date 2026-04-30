@@ -189,6 +189,8 @@ class SQLWriterAgent:
         last_sql = ""
         sqlite_exec_count = 0
         last_error = ""
+        last_exec_signature = ""
+        repeated_exec_count = 0
 
         for turn in range(1, self.max_turns + 1):
             if cancel_event is not None and cancel_event.is_set():
@@ -414,6 +416,33 @@ class SQLWriterAgent:
                         "content": json.dumps(exec_result, ensure_ascii=False),
                     }
                 )
+                exec_signature = duplicate_exec_signature(sql, exec_result)
+                if exec_signature and exec_signature == last_exec_signature:
+                    repeated_exec_count += 1
+                else:
+                    repeated_exec_count = 1
+                    last_exec_signature = exec_signature
+                if repeated_exec_count >= 2:
+                    notice = (
+                        "NOTICE: You have executed a duplicated or equivalent SQL result "
+                        f"{repeated_exec_count} times in a row. If this SQL already answers "
+                        "the full user question and follows the external evidence, call "
+                        "SWA_REPORT next and finish your job. Do not execute the same or "
+                        "equivalent SQL again unless the next query changes the answer logic."
+                    )
+                    messages.append({"role": "user", "content": notice})
+                    self.tracer.emit(
+                        "worker_notice",
+                        agent_label,
+                        "Duplicate SQL execution notice appended.",
+                        global_step=global_step,
+                        worker_step=turn,
+                        status="ok",
+                        payload={
+                            "notice": notice,
+                            "repeated_exec_count": repeated_exec_count,
+                        },
+                    )
 
         self.tracer.emit(
             "worker_finish",
@@ -1103,6 +1132,13 @@ def compact_exec_result(exec_result: Dict[str, Any], preview_rows: int = 5) -> D
         "preview_rows": rows[:preview_rows],
         "warnings": body.get("warnings", []),
     }
+
+
+def duplicate_exec_signature(sql: str, exec_result: Dict[str, Any]) -> str:
+    if exec_result.get("ok"):
+        return "ok:" + result_signature(exec_result, require_columns=True)
+    error = str(exec_result.get("error") or "")
+    return "err:" + " ".join(str(sql or "").split()).rstrip(";").lower() + ":" + error
 
 
 def candidate_payloads(candidates: Dict[str, WriterCandidate]) -> Dict[str, Any]:
