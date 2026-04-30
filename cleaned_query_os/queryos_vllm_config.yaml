@@ -1,4 +1,4 @@
-# QueryOS config template for a local OpenAI-compatible vLLM server.
+# QueryOS config for a multi-copy OpenAI-compatible vLLM deployment.
 #
 # Example server shape:
 #   base_url: http://localhost:8000/v1
@@ -10,71 +10,80 @@
 
 provider: vllm
 
-# Single-endpoint fallback. Used when llm_router.endpoints is empty.
+# Single-endpoint fallback. Used if llm_router.endpoints is empty/unavailable.
 base_url: http://localhost:8000/v1
 api_key: EMPTY
 
 # Must match your vLLM --served-model-name, or the model id exposed by /v1/models.
-model: queryos-local
+model: Qwen/Qwen3-Coder-Next
 temperature: 0.2
-llm_timeout_seconds: 120
+llm_timeout_seconds: 180
 
 llm_router:
   enabled: true
   # least_inflight is the best default when multiple copies have similar capacity.
   # Other options: round_robin, random.
   strategy: least_inflight
-  request_timeout_seconds: 120
-  max_retries: 2
-  cooldown_seconds: 30
+  request_timeout_seconds: 180
+  max_retries: 3
+  cooldown_seconds: 15
 
-  # Empty list means: route to the top-level base_url above.
-  # To use multiple copies, replace [] with endpoints like:
-  #
-  # endpoints:
-  #   - name: node1-copy1
-  #     base_url: http://node1:8001/v1
-  #     api_key: EMPTY
-  #     model: queryos-local
-  #     weight: 1
-  #     max_inflight: 8
-  #   - name: node1-copy2
-  #     base_url: http://node1:8002/v1
-  #     api_key: EMPTY
-  #     model: queryos-local
-  #     weight: 1
-  #     max_inflight: 8
-  #   - name: node2-copy1
-  #     base_url: http://node2:8001/v1
-  #     api_key: EMPTY
-  #     model: queryos-local
-  #     weight: 1
-  #     max_inflight: 8
-  #   - name: node2-copy2
-  #     base_url: http://node2:8002/v1
-  #     api_key: EMPTY
-  #     model: queryos-local
-  #     weight: 1
-  #     max_inflight: 8
-  endpoints: []
+  # Three nodes, two vLLM copies per node.
+  endpoints:
+    - name: local-8000
+      base_url: http://localhost:8000/v1
+      api_key: EMPTY
+      model: Qwen/Qwen3-Coder-Next
+      weight: 1
+      max_inflight: 16
+    - name: local-8001
+      base_url: http://localhost:8001/v1
+      api_key: EMPTY
+      model: Qwen/Qwen3-Coder-Next
+      weight: 1
+      max_inflight: 16
+    - name: node-4-186-8000
+      base_url: http://172.31.4.186:8000/v1
+      api_key: EMPTY
+      model: Qwen/Qwen3-Coder-Next
+      weight: 1
+      max_inflight: 16
+    - name: node-4-186-8001
+      base_url: http://172.31.4.186:8001/v1
+      api_key: EMPTY
+      model: Qwen/Qwen3-Coder-Next
+      weight: 1
+      max_inflight: 16
+    - name: node-14-215-8000
+      base_url: http://172.31.14.215:8000/v1
+      api_key: EMPTY
+      model: Qwen/Qwen3-Coder-Next
+      weight: 1
+      max_inflight: 16
+    - name: node-14-215-8001
+      base_url: http://172.31.14.215:8001/v1
+      api_key: EMPTY
+      model: Qwen/Qwen3-Coder-Next
+      weight: 1
+      max_inflight: 16
 
   # Optional role-specific pools. If omitted, every role can use every endpoint.
   role_pools:
     planner:
       strategy: least_inflight
-      endpoints: [node1-copy1, node1-copy2, node2-copy1, node2-copy2]
+      endpoints: [local-8000, local-8001, node-4-186-8000, node-4-186-8001, node-14-215-8000, node-14-215-8001]
     schema_discovery:
       strategy: least_inflight
-      endpoints: [node1-copy1, node1-copy2, node2-copy1, node2-copy2]
+      endpoints: [local-8000, local-8001, node-4-186-8000, node-4-186-8001, node-14-215-8000, node-14-215-8001]
     sql_writer:
       strategy: least_inflight
-      endpoints: [node1-copy1, node1-copy2, node2-copy1, node2-copy2]
+      endpoints: [local-8000, local-8001, node-4-186-8000, node-4-186-8001, node-14-215-8000, node-14-215-8001]
     sql_validator:
       strategy: least_inflight
-      endpoints: [node1-copy1, node1-copy2, node2-copy1, node2-copy2]
+      endpoints: [local-8000, local-8001, node-4-186-8000, node-4-186-8001, node-14-215-8000, node-14-215-8001]
     reason_summarizer:
       strategy: least_inflight
-      endpoints: [node1-copy1, node1-copy2, node2-copy1, node2-copy2]
+      endpoints: [local-8000, local-8001, node-4-186-8000, node-4-186-8001, node-14-215-8000, node-14-215-8001]
 
 models:
   # Leave blank/null to inherit `model`, or route roles to different served names.
@@ -86,45 +95,45 @@ models:
   reason_summarizer:
 
 workflow:
-  max_steps: 20
+  max_steps: 30
   validation: auto
   auto_finish_on_sql: false
 
 planner:
   context: dispatch
-  max_tokens: 4096
+  max_tokens: 8192
 
 schema_discovery:
-  max_tokens: 8192
-  max_turns: 16
-  max_tool_calls_per_turn: 8
-  parallel_workers: 2
+  max_tokens: 16384
+  max_turns: 24
+  max_tool_calls_per_turn: 12
+  parallel_workers: 4
   # Whole parallel SDA group watchdog. 0 disables the group watchdog.
-  parallel_timeout_seconds: 150
+  parallel_timeout_seconds: 240
   read_table_summary_max_cols: 0
   trace_column_preview_limit: 0
 
 sql_writer:
-  max_tokens: 8192
-  max_turns: 16
-  parallel_workers: 2
+  max_tokens: 16384
+  max_turns: 24
+  parallel_workers: 4
   # Whole initial SQL writer group watchdog. Completed workers keep going.
-  parallel_timeout_seconds: 150
+  parallel_timeout_seconds: 240
   consensus:
     require_same_columns: false
   chatgroup:
     enabled: true
-    max_rounds: 2
+    max_rounds: 4
 
 sql_validator:
-  max_tokens: 4096
+  max_tokens: 8192
 
 trace:
   live: true
   style: pretty
   color: auto
   max_chars: 0
-  sql_preview_rows: 10
-  gold_preview_rows: 10
-  result_cell_max_width: 64
+  sql_preview_rows: 20
+  gold_preview_rows: 20
+  result_cell_max_width: 96
   state_view: full
