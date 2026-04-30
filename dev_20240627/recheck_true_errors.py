@@ -268,6 +268,8 @@ def recheck_record(
     pred_rows = predicted["rows"]
     gold_rows = gold["rows"]
     gold_ordered = has_order_by(gold_sql)
+    percent_context = has_percent_context(record, predicted["columns"], gold["columns"])
+    base["percent_context"] = percent_context
 
     if rows_equal(pred_rows, gold_rows):
         return relaxed_cluster(base, "exact_full_match_after_reexecution", "Full rows match after re-execution.")
@@ -288,6 +290,7 @@ def recheck_record(
         gold_columns=gold["columns"],
         allow_unordered=not gold_ordered,
         max_combinations=max_projection_combinations,
+        percent_context=False,
     )
     if projection:
         pred_width = len(predicted["columns"])
@@ -301,6 +304,55 @@ def recheck_record(
         if projection["match_type"] == "unordered":
             cluster = "column_display_order_and_row_order_only"
         return relaxed_cluster(base, cluster, "Predicted columns can be reordered to match gold output.", projection)
+
+    if percent_context:
+        if rows_equal_scaled(pred_rows, gold_rows):
+            return relaxed_cluster(
+                base,
+                "percentage_scale_only",
+                "Rows differ only by percentage scale, e.g. 0.12 versus 12 percent.",
+                details=percent_payload(),
+            )
+        if not gold_ordered and rows_unordered_equal_scaled(pred_rows, gold_rows):
+            return relaxed_cluster(
+                base,
+                "percentage_scale_and_row_order_only",
+                "Rows differ only by percentage scale and row order; gold SQL has no ORDER BY.",
+                details=percent_payload(),
+            )
+        projection = find_matching_projection(
+            pred_rows=pred_rows,
+            gold_rows=gold_rows,
+            pred_columns=predicted["columns"],
+            gold_columns=gold["columns"],
+            allow_unordered=not gold_ordered,
+            max_combinations=max_projection_combinations,
+            percent_context=True,
+        )
+        if projection:
+            pred_width = len(predicted["columns"])
+            gold_width = len(gold["columns"])
+            if pred_width > gold_width:
+                cluster = "extra_columns_and_percentage_scale_only"
+                if projection["match_type"] == "unordered":
+                    cluster = "extra_columns_percentage_scale_and_row_order_only"
+                return relaxed_cluster(
+                    base,
+                    cluster,
+                    "Gold output is a percentage-scale projection of predicted output.",
+                    projection,
+                    details=percent_payload(),
+                )
+            cluster = "column_order_and_percentage_scale_only"
+            if projection["match_type"] == "unordered":
+                cluster = "column_order_percentage_scale_and_row_order_only"
+            return relaxed_cluster(
+                base,
+                cluster,
+                "Predicted columns can be reordered and percentage-scaled to match gold output.",
+                projection,
+                details=percent_payload(),
+            )
 
     if len(pred_rows) != len(gold_rows):
         return true_cluster(base, "row_count_mismatch", "Full row counts differ after re-execution.")
@@ -371,6 +423,7 @@ def find_matching_projection(
     gold_columns: List[str],
     allow_unordered: bool,
     max_combinations: int,
+    percent_context: bool,
 ) -> Optional[Dict[str, Any]]:
     pred_width = len(pred_columns)
     gold_width = len(gold_columns)
@@ -383,9 +436,12 @@ def find_matching_projection(
         if checked > max_combinations:
             return None
         projected = project_rows(pred_rows, indices)
-        if rows_equal(projected, gold_rows):
+        if rows_equal(projected, gold_rows) or (percent_context and rows_equal_scaled(projected, gold_rows)):
             return projection_payload(indices, pred_columns, checked, "exact")
-        if allow_unordered and rows_unordered_equal(projected, gold_rows):
+        if allow_unordered and (
+            rows_unordered_equal(projected, gold_rows)
+            or (percent_context and rows_unordered_equal_scaled(projected, gold_rows))
+        ):
             return projection_payload(indices, pred_columns, checked, "unordered")
     return None
 
@@ -409,6 +465,54 @@ def rows_equal(left: List[List[Any]], right: List[List[Any]]) -> bool:
 
 def rows_unordered_equal(left: List[List[Any]], right: List[List[Any]]) -> bool:
     return Counter(canonical_rows(left)) == Counter(canonical_rows(right))
+
+
+def rows_equal_scaled(left: List[List[Any]], right: List[List[Any]]) -> bool:
+    if len(left) != len(right):
+        return False
+    return all(row_equal_scaled(left_row, right_row) for left_row, right_row in zip(left, right))
+
+
+def rows_unordered_equal_scaled(left: List[List[Any]], right: List[List[Any]]) -> bool:
+    if len(left) != len(right):
+        return False
+    unmatched = list(right)
+    for left_row in left:
+        match_idx = None
+        for idx, right_row in enumerate(unmatched):
+            if row_equal_scaled(left_row, right_row):
+                match_idx = idx
+                break
+        if match_idx is None:
+            return False
+        unmatched.pop(match_idx)
+    return True
+
+
+def row_equal_scaled(left: List[Any], right: List[Any]) -> bool:
+    if len(left) != len(right):
+        return False
+    return all(cell_equal_scaled(left_cell, right_cell) for left_cell, right_cell in zip(left, right))
+
+
+def cell_equal_scaled(left: Any, right: Any) -> bool:
+    if canonical_cell(left) == canonical_cell(right):
+        return True
+    if is_number(left) and is_number(right):
+        left_num = float(left)
+        right_num = float(right)
+        return numeric_close(left_num * 100.0, right_num) or numeric_close(left_num, right_num * 100.0)
+    return False
+
+
+def numeric_close(left: float, right: float) -> bool:
+    if not (math.isfinite(left) and math.isfinite(right)):
+        return False
+    return abs(left - right) <= max(1e-6, 1e-6 * max(abs(left), abs(right)))
+
+
+def is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def canonical_rows(rows: List[List[Any]]) -> List[Tuple[Any, ...]]:
@@ -439,6 +543,28 @@ def has_order_by(sql: str) -> bool:
     return bool(re.search(r"\border\s+by\b", sql or "", flags=re.IGNORECASE))
 
 
+def has_percent_context(record: Dict[str, Any], predicted_columns: List[str], gold_columns: List[str]) -> bool:
+    text = " ".join(
+        [
+            str(record.get("question") or ""),
+            str(record.get("evidence") or ""),
+            " ".join(str(col) for col in predicted_columns),
+            " ".join(str(col) for col in gold_columns),
+        ]
+    )
+    return bool(
+        re.search(
+            r"(%|\bpercent\b|\bpercentage\b|\bpct\b)",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def percent_payload() -> Dict[str, Any]:
+    return {"scale_equivalence": "0-1_fraction_vs_0-100_percent"}
+
+
 def true_cluster(base: Dict[str, Any], cluster: str, reason: str) -> Dict[str, Any]:
     return {**base, "true_error": True, "cluster": cluster, "reason": reason}
 
@@ -448,10 +574,13 @@ def relaxed_cluster(
     cluster: str,
     reason: str,
     projection: Optional[Dict[str, Any]] = None,
+    details: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     payload = {**base, "true_error": False, "cluster": cluster, "reason": reason}
     if projection:
         payload["projection"] = projection
+    if details:
+        payload.update(details)
     return payload
 
 

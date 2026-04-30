@@ -302,6 +302,8 @@ def process_sample(
                     record={
                         "question_id": question_id,
                         "db_id": db_id,
+                        "question": sample.get("question", ""),
+                        "evidence": sample.get("evidence", ""),
                         "predicted_sql": result_doc.get("final_sql", ""),
                         "gold_sql": sample.get("SQL", ""),
                     },
