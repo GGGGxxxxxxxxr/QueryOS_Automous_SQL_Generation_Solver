@@ -268,20 +268,21 @@ class EventTracer:
         if event_type == "writer_group_action":
             writer = str(payload.get("writer") or agent)
             action = str(payload.get("action") or "")
+            reason = str(payload.get("reason") or "")
             status_color = "red" if action == "QUIT" else "cyan"
-            lines = [
-                f"    {self._color(writer, 'yellow', bold=True)} "
-                f"{self._color(action, status_color, bold=True)}"
-            ]
+            action_text = action
+            if action == "QUIT" and reason:
+                action_text = f"{action}({self._shorten(reason, 96)})"
+            lines = [f"    {self._color(writer, 'yellow', bold=True)} {self._color(action_text, status_color, bold=True)}"]
             signature = str(payload.get("signature") or "")
             if signature:
                 lines.append(f"      {self._color('signature', 'cyan')}: {signature[:16]}")
             convinced_by = str(payload.get("convinced_by_signature") or "")
             if convinced_by:
                 lines.append(f"      {self._color('convinced by', 'cyan')}: {convinced_by[:16]}")
-            if payload.get("reason"):
+            if reason and action != "QUIT":
                 label = "message" if action == "CHAT" else "reason"
-                lines.append(f"      {self._color(label, 'yellow')}: {payload.get('reason')}")
+                lines.append(f"      {self._color(label, 'yellow')}: {reason}")
             if payload.get("version") is not None:
                 lines.append(f"      {self._color('version', 'cyan')}: {payload.get('version')}")
             return "\n".join(lines)

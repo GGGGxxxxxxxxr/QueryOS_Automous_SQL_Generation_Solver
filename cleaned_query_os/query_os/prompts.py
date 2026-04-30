@@ -251,6 +251,11 @@ Defend your SQL or quit if another is clearly better.
 - Do NOT modify SQL
 - Use execution results as evidence
 - Focus on correctness, not style
+- Write CHAT messages in first person as yourself.
+- Say "I", "my SQL", "my result", and "I am convinced"; do not refer to yourself in third person.
+- If another faction convinces you, call QUIT instead of CHAT.
+- QUIT is a spoken exit action, not silent. Include a natural-language first-person reason.
+- Example: QUIT(reason="My SQL is not good because it misses the required filter.")
 
 ---
 

@@ -67,7 +67,11 @@ SQL_WRITER_CHAT_TOOLS = [
         "type": "function",
         "function": {
             "name": "QUIT",
-            "description": "Leave the group chat because another faction is more convincing.",
+            "description": (
+                "Leave the group chat because another faction is more convincing. "
+                "This is a spoken exit action: call QUIT with a natural-language reason, "
+                "like QUIT(reason='My SQL is not good because ...')."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1087,6 +1091,10 @@ def build_writer_group_chat_context(
             "You cannot revise SQL in this phase.",
             "Representatives speak one at a time; chat_history may include earlier messages from this same round.",
             "Use CHAT to defend your result or challenge another faction.",
+            "Write CHAT messages in first person as yourself: use I, my SQL, my result, and I am convinced.",
+            "Do not refer to yourself in third person, and do not speak as another worker.",
+            "If another faction convinces you, use QUIT instead of CHAT.",
+            "QUIT is not silent: write a natural-language first-person reason, like QUIT(reason='My SQL is not good because ...').",
             "Use QUIT only when another faction has convinced you that your result should not win.",
             "The runtime declares the winner when only one representative remains.",
         ],
@@ -1099,7 +1107,9 @@ def build_writer_group_chat_context(
     return (
         f"YOU ARE: {worker_id}.\n"
         f"You are speaking as {worker_id}, the representative for your current result faction.\n"
-        "Use this identity consistently in the group chat. Do not speak as another worker.\n\n"
+        "Use this identity consistently in the group chat. Write in first person as yourself. "
+        "Do not speak as another worker. If I am convinced by another faction, I should call QUIT "
+        "with a natural-language reason, e.g. QUIT(reason='My SQL is not good because ...').\n\n"
         "GROUP CHAT CONTEXT JSON:\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
