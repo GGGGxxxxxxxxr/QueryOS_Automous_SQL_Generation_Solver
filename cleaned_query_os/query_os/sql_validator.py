@@ -282,6 +282,43 @@ class SQLValidatorAgent:
             if not feedback:
                 feedback = "The latest SQL candidate does not sufficiently satisfy the question and evidence."
             severity = str(args.get("severity") or "blocking").strip()
+            if severity != "blocking":
+                reason = f"Validation passed with non-blocking concerns: {feedback}"
+                attempt = ValidationAttempt(
+                    sql_attempt_idx=sql_attempt_idx,
+                    status="pass",
+                    issues=issues,
+                    feedback=feedback,
+                    report=reason,
+                    confidence="low",
+                )
+                state.validation_attempts.append(attempt)
+                state.workflow_status = WorkflowStatus.SQL_VALIDATED
+                self.tracer.emit(
+                    "tool_result",
+                    "SVA",
+                    "Converted non-blocking validation concerns to pass.",
+                    global_step=global_step,
+                    worker_step=1,
+                    tool="VALIDATION_PASS",
+                    status="ok",
+                    payload=validation_payload(attempt),
+                )
+                self.tracer.emit(
+                    "worker_finish",
+                    "SVA",
+                    "SQL validator worker finished with non-blocking concerns.",
+                    global_step=global_step,
+                    worker_step=1,
+                    status="ok",
+                    payload=validation_payload(attempt),
+                )
+                return AgentReturn(
+                    agent=AgentName.SQL_VALIDATOR,
+                    ok=True,
+                    report=reason,
+                    payload={"validation_status": "pass", "sql_attempt_idx": sql_attempt_idx},
+                )
             report = f"Validation failed ({severity})."
             return self._record_fail(
                 state,
