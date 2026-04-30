@@ -82,7 +82,7 @@ models:
   schema_discovery:
   sql_writer:
   sql_validator:
-  # Used by dev_20240627-2/build_failure_memory.py for mismatch summaries.
+  # Used by dev_20240627/build_failure_memory.py for mismatch summaries.
   reason_summarizer:
 
 workflow:

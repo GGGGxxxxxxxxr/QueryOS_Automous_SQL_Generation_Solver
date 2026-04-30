@@ -25,11 +25,10 @@ __pycache__/
 !cleaned_query_os/queryos_vllm_config.yaml
 
 # Local benchmark data and generated run artifacts.
-dev_20240627/
-dev_20240627-2/dev.sql
-dev_20240627-2/dev_databases/
-dev_20240627-2/traces/
-dev_20240627-2/failure_memory/
+dev_20240627/dev.sql
+dev_20240627/dev_databases/
+dev_20240627/traces/
+dev_20240627/failure_memory/
 
 # Virtual environments
 venv/

@@ -197,7 +197,7 @@ whether to retry, ask for more schema, or change strategy.
 │   ├── queryos_vllm_config.yaml   # local vLLM config template
 │   ├── README.md                  # package-level usage docs
 │   └── pyproject.toml
-├── dev_20240627-2/
+├── dev_20240627/
 │   ├── build_failure_memory.py    # batch evaluator + failure-memory builder
 │   └── build_table_description_json.py
 └── raw_query_os_original/         # archived original files
@@ -231,8 +231,8 @@ export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
 
 query-os \
   --config cleaned_query_os/queryos_config.yaml \
-  --db dev_20240627-2/dev_databases/financial/financial.sqlite \
-  --metadata dev_20240627-2/dev_databases/financial/database_description \
+  --db dev_20240627/dev_databases/financial/financial.sqlite \
+  --metadata dev_20240627/dev_databases/financial/database_description \
   --question "How many accounts who have region in Prague are eligible for loans?"
 ```
 
@@ -241,8 +241,8 @@ With golden SQL comparison:
 ```bash
 query-os \
   --config cleaned_query_os/queryos_config.yaml \
-  --db dev_20240627-2/dev_databases/financial/financial.sqlite \
-  --metadata dev_20240627-2/dev_databases/financial/database_description \
+  --db dev_20240627/dev_databases/financial/financial.sqlite \
+  --metadata dev_20240627/dev_databases/financial/database_description \
   --question "How many accounts who have region in Prague are eligible for loans?" \
   --gold-sql "SELECT COUNT(T1.account_id) FROM account AS T1 INNER JOIN loan AS T2 ON T1.account_id = T2.account_id INNER JOIN district AS T3 ON T1.district_id = T3.district_id WHERE T3.A3 = 'Prague'"
 ```
@@ -252,11 +252,11 @@ Save trace and result JSON:
 ```bash
 query-os \
   --config cleaned_query_os/queryos_config.yaml \
-  --db dev_20240627-2/dev_databases/financial/financial.sqlite \
-  --metadata dev_20240627-2/dev_databases/financial/database_description \
+  --db dev_20240627/dev_databases/financial/financial.sqlite \
+  --metadata dev_20240627/dev_databases/financial/database_description \
   --question "..." \
-  --trace-json dev_20240627-2/traces/example_trace.json \
-  --result-json dev_20240627-2/traces/example_result.json
+  --trace-json dev_20240627/traces/example_trace.json \
+  --result-json dev_20240627/traces/example_result.json
 ```
 
 ## Run With Local vLLM
@@ -277,8 +277,8 @@ Then run:
 query-os \
   --config cleaned_query_os/queryos_vllm_config.yaml \
   --provider vllm \
-  --db dev_20240627-2/dev_databases/financial/financial.sqlite \
-  --metadata dev_20240627-2/dev_databases/financial/database_description \
+  --db dev_20240627/dev_databases/financial/financial.sqlite \
+  --metadata dev_20240627/dev_databases/financial/database_description \
   --question "The transaction of 840 USD happened in 1998/10/14, when was this account opened?"
 ```
 
@@ -331,13 +331,13 @@ The router is most useful when QueryOS is already concurrent, for example with
 
 ## Batch Failure Memory
 
-`dev_20240627-2/build_failure_memory.py` runs QueryOS over benchmark samples,
+`dev_20240627/build_failure_memory.py` runs QueryOS over benchmark samples,
 compares each predicted result with golden SQL, and stores mismatch cases as an
 error bank. Each failure receives one unified natural-language error reason from
 the configured model.
 
 ```bash
-cd dev_20240627-2
+cd dev_20240627
 
 python build_failure_memory.py \
   --config ../cleaned_query_os/queryos_config.yaml \
@@ -358,8 +358,8 @@ python build_failure_memory.py \
 Generated outputs are ignored by git:
 
 ```text
-dev_20240627-2/failure_memory/
-dev_20240627-2/traces/
+dev_20240627/failure_memory/
+dev_20240627/traces/
 ```
 
 ## Config Highlights

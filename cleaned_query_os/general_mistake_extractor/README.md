@@ -48,8 +48,8 @@ From the repository root:
 
 ```bash
 python cleaned_query_os/general_mistake_extractor/build_general_mistakes.py \
-  --error-bank dev_20240627-2/failure_memory/error_bank.jsonl \
-  --out dev_20240627-2/general_mistakes \
+  --error-bank dev_20240627/failure_memory/error_bank.jsonl \
+  --out dev_20240627/general_mistakes \
   --config cleaned_query_os/queryos_vllm_config.yaml \
   --provider vllm \
   --limit 20 \
@@ -64,8 +64,8 @@ OpenAI example:
 export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
 
 python cleaned_query_os/general_mistake_extractor/build_general_mistakes.py \
-  --error-bank dev_20240627-2/failure_memory/error_bank.jsonl \
-  --out dev_20240627-2/general_mistakes \
+  --error-bank dev_20240627/failure_memory/error_bank.jsonl \
+  --out dev_20240627/general_mistakes \
   --config cleaned_query_os/queryos_config.yaml
 ```
 
