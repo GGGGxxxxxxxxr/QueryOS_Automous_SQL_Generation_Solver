@@ -50,7 +50,7 @@ def main() -> int:
     parser.add_argument("--question-id", type=int, action="append", help="Only recheck these question IDs.")
     parser.add_argument("--limit", type=int, help="Maximum number of records to recheck after filters.")
     parser.add_argument("--offset", type=int, default=0)
-    parser.add_argument("--max-rows", type=int, default=200000, help="0 means fetch all rows.")
+    parser.add_argument("--max-rows", type=int, default=2000, help="0 means fetch all rows.")
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--preview-rows", type=int, default=10)
     parser.add_argument("--max-projection-combinations", type=int, default=20000)
