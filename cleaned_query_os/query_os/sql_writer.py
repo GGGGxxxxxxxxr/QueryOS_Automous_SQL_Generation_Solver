@@ -1078,8 +1078,8 @@ def build_writer_group_chat_context(
         "worker_id": worker_id,
         "round": round_idx,
         "objective": (
-            "Sequential group chat among result-faction representatives. "
-            "Each representative can see earlier messages, then chat or quit until one faction remains."
+            "Sequential quick group chat among result-faction representatives. "
+            "Each representative can see earlier messages, then make one short point or quit until one faction remains."
         ),
         "question": state.question,
         "external_knowledge": state.external_knowledge,
@@ -1091,7 +1091,9 @@ def build_writer_group_chat_context(
             "You cannot revise SQL in this phase.",
             "Representatives speak one at a time; chat_history may include earlier messages from this same round.",
             "Use CHAT to defend your result or challenge another faction.",
-            "Write CHAT messages in first person as yourself: use I, my SQL, my result, and I am convinced.",
+            "Write in first person as yourself, but do not introduce yourself; do not start with 'I am writer_1' or 'As writer_2'.",
+            "Keep each CHAT message to 1-3 short conversational sentences.",
+            "Do not repeat an argument already made in chat_history unless you add new evidence.",
             "Do not refer to yourself in third person, and do not speak as another worker.",
             "If another faction convinces you, use QUIT instead of CHAT.",
             "QUIT is not silent: write a natural-language first-person reason, like QUIT(reason='My SQL is not good because ...').",
@@ -1107,7 +1109,8 @@ def build_writer_group_chat_context(
     return (
         f"YOU ARE: {worker_id}.\n"
         f"You are speaking as {worker_id}, the representative for your current result faction.\n"
-        "Use this identity consistently in the group chat. Write in first person as yourself. "
+        "Use this identity internally, but do not introduce yourself in the message; the log already shows your worker id. "
+        "Write like a concise coworker: 1-3 short first-person sentences, no formal debate speech, no repeated points. "
         "Do not speak as another worker. If I am convinced by another faction, I should call QUIT "
         "with a natural-language reason, e.g. QUIT(reason='My SQL is not good because ...').\n\n"
         "GROUP CHAT CONTEXT JSON:\n"
