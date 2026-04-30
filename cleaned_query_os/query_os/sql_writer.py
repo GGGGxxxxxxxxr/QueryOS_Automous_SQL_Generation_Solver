@@ -477,6 +477,7 @@ class SQLWriterAgent:
 
         if not self.chatgroup_enabled or self.chatgroup_max_rounds <= 0:
             return self._writer_group_divergence(
+                state=state,
                 global_step=global_step,
                 candidates=candidates,
                 rounds=0,
@@ -630,6 +631,7 @@ class SQLWriterAgent:
                 chat_history=chat_history,
             )
         return self._writer_group_divergence(
+            state=state,
             global_step=global_step,
             candidates=candidates,
             rounds=self.chatgroup_max_rounds,
@@ -815,32 +817,49 @@ class SQLWriterAgent:
     def _writer_group_divergence(
         self,
         *,
+        state: SharedState,
         global_step: int,
         candidates: Dict[str, WriterCandidate],
         rounds: int,
         reason: str,
         chat_history: Optional[List[Dict[str, Any]]] = None,
     ) -> AgentReturn:
+        factions = build_result_factions(
+            candidates,
+            require_columns=self.consensus_require_same_columns,
+            preview_rows=self.trace_sql_preview_rows,
+        )
+        pending_payload = {
+            "reason": reason,
+            "rounds": rounds,
+            "chat_rounds": len(chat_history or []),
+            "candidates": candidate_payloads(candidates),
+            "factions": factions,
+            "chat_history": chat_history or [],
+        }
+        state.pending_writer_group = pending_payload
         self.tracer.emit(
             "writer_group_divergence",
             "SWA",
             reason,
             global_step=global_step,
-            status="error",
+            status="ok",
             payload={
                 "reason": reason,
                 "rounds": rounds,
                 "chat_rounds": len(chat_history or []),
+                "selectable": True,
                 "candidates": candidate_trace_summaries(candidates),
             },
         )
         return AgentReturn(
             agent=AgentName.SQL_WRITER,
-            ok=False,
+            ok=True,
             report=reason,
             payload={
                 "reason": "writer_group_divergence",
-                "writer_group": candidate_payloads(candidates),
+                "writer_group": pending_payload["candidates"],
+                "writer_group_factions": factions,
                 "writer_group_chat_history": chat_history or [],
             },
         )
@@ -883,6 +902,7 @@ def fork_shared_state_for_worker(state: SharedState) -> SharedState:
         discovered=state.discovered,
         sql_attempts=list(state.sql_attempts),
         validation_attempts=list(state.validation_attempts),
+        pending_writer_group=dict(state.pending_writer_group),
         planner_trace=list(state.planner_trace),
         step=state.step,
         max_steps=state.max_steps,
@@ -1018,6 +1038,7 @@ def candidate_payloads(candidates: Dict[str, WriterCandidate]) -> Dict[str, Any]
             "report": candidate.report,
             "last_action": candidate.last_action,
             "result": compact_exec_result(candidate.current_result),
+            "exec_result": candidate.current_result,
             "history": candidate.history,
         }
         for worker_id, candidate in candidates.items()

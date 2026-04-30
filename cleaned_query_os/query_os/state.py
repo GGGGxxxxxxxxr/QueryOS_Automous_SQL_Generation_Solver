@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 class PlannerAction(str, Enum):
     CALL_SCHEMA_DISCOVERY = "CALL_SCHEMA_DISCOVERY"
     CALL_SQL_WRITER = "CALL_SQL_WRITER"
+    SELECT_SUBMISSION_SQL = "SELECT_SUBMISSION_SQL"
     FINISH = "FINISH"
 
 
@@ -21,6 +22,7 @@ class AgentName(str, Enum):
 class WorkflowStatus(str, Enum):
     NEED_SCHEMA = "NEED_SCHEMA"
     SCHEMA_READY = "SCHEMA_READY"
+    PENDING_SUBMISSION_SELECTION = "PENDING_SUBMISSION_SELECTION"
     SQL_CANDIDATE_READY = "SQL_CANDIDATE_READY"
     VALIDATION_FAILED = "VALIDATION_FAILED"
     SQL_VALIDATED = "SQL_VALIDATED"
@@ -62,6 +64,7 @@ class ValidationAttempt:
 class PlannerDecision:
     action: PlannerAction
     guidance: str = ""
+    selected_worker: str = ""
 
 
 @dataclass
@@ -91,6 +94,7 @@ class SharedState:
     discovered: DiscoveredSchema = field(default_factory=DiscoveredSchema)
     sql_attempts: List[SQLAttempt] = field(default_factory=list)
     validation_attempts: List[ValidationAttempt] = field(default_factory=list)
+    pending_writer_group: Dict[str, Any] = field(default_factory=dict)
     planner_trace: List[TraceStep] = field(default_factory=list)
     step: int = 0
     max_steps: int = 8

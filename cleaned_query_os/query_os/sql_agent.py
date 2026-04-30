@@ -18,6 +18,7 @@ from .state import (
     AgentReturn,
     PlannerAction,
     PlannerDecision,
+    SQLAttempt,
     SQLGenerationResult,
     SharedState,
     TraceStep,
@@ -53,6 +54,31 @@ PLANNER_TOOLS = [
                 "type": "object",
                 "properties": {"guidance": {"type": "string"}},
                 "required": ["guidance"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "SELECT_SUBMISSION_SQL",
+            "description": (
+                "Select one existing SQL writer group candidate as the current submission_SQL. "
+                "Use only when current_shared_state.pending_writer_group exists."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "worker": {
+                        "type": "string",
+                        "description": "The worker id to select, such as writer_1.",
+                    },
+                    "guidance": {
+                        "type": "string",
+                        "description": "Short reason why this candidate should become submission_SQL.",
+                    },
+                },
+                "required": ["worker", "guidance"],
                 "additionalProperties": False,
             },
         },
@@ -122,7 +148,8 @@ class Planner:
             guidance = str(args.get("guidance") or "").strip()
             if not guidance:
                 guidance = "Proceed with the next necessary step."
-            return planner_tool_to_decision(tc.function.name, guidance)
+            selected_worker = str(args.get("worker") or args.get("selected_worker") or "").strip()
+            return planner_tool_to_decision(tc.function.name, guidance, selected_worker=selected_worker)
         except Exception as exc:
             err = safe_llm_error(exc)
             if is_fatal_llm_error(exc):
@@ -198,11 +225,13 @@ class AgenticSystem:
                 )
                 break
             before_state = self._snapshot_state(state)
+            before_sql_attempt_count = len(state.sql_attempts)
             trace = TraceStep(step_idx=state.step, decision=decision)
             state.planner_trace.append(trace)
             action_message = {
                 PlannerAction.CALL_SCHEMA_DISCOVERY: "Call schema discovery worker.",
                 PlannerAction.CALL_SQL_WRITER: "Call SQL writer worker.",
+                PlannerAction.SELECT_SUBMISSION_SQL: "Select writer group submission_SQL.",
                 PlannerAction.FINISH: "Finish run.",
             }.get(decision.action, f"Call {decision.action.value}.")
             self.tracer.emit(
@@ -210,17 +239,29 @@ class AgenticSystem:
                 "manager",
                 action_message,
                 global_step=global_step,
-                payload={"action": decision.action.value, "guidance": decision.guidance},
+                payload={
+                    "action": decision.action.value,
+                    "guidance": decision.guidance,
+                    "selected_worker": decision.selected_worker,
+                },
             )
 
             validation_ret: Optional[AgentReturn] = None
             if decision.action == PlannerAction.CALL_SCHEMA_DISCOVERY:
+                state.pending_writer_group = {}
                 ret = self.sda.run(state, decision.guidance, self.metadata)
                 if ret.ok:
                     state.workflow_status = WorkflowStatus.SCHEMA_READY
             elif decision.action == PlannerAction.CALL_SQL_WRITER:
+                state.pending_writer_group = {}
                 ret = self.swa.run(state, decision.guidance)
                 if ret.ok and latest_successful_attempt(state):
+                    state.workflow_status = WorkflowStatus.SQL_CANDIDATE_READY
+                if ret.payload.get("reason") == "writer_group_divergence" and state.pending_writer_group:
+                    state.workflow_status = WorkflowStatus.PENDING_SUBMISSION_SELECTION
+            elif decision.action == PlannerAction.SELECT_SUBMISSION_SQL:
+                ret = select_pending_submission_sql(state, decision.selected_worker, decision.guidance)
+                if ret.ok:
                     state.workflow_status = WorkflowStatus.SQL_CANDIDATE_READY
             elif decision.action == PlannerAction.FINISH:
                 if can_finish(state, self.validation_mode):
@@ -260,7 +301,7 @@ class AgenticSystem:
             self.tracer.emit(
                 "worker_return",
                 "manager",
-                f"{ret.agent.value} returned.",
+                f"{agent_display_name(ret.agent)} returned.",
                 global_step=global_step,
                 status="ok" if ret.ok else "error",
                 payload=make_json_safe({"report": ret.report, **ret.payload}),
@@ -268,7 +309,8 @@ class AgenticSystem:
             if (
                 self.validation_mode == "auto"
                 and ret.ok
-                and decision.action == PlannerAction.CALL_SQL_WRITER
+                and decision.action in {PlannerAction.CALL_SQL_WRITER, PlannerAction.SELECT_SUBMISSION_SQL}
+                and len(state.sql_attempts) > before_sql_attempt_count
                 and latest_successful_attempt(state)
             ):
                 validation_ret = self.sva.run(state) if self.sva else missing_validator_return(state)
@@ -298,7 +340,7 @@ class AgenticSystem:
                 self.auto_finish_on_sql
                 and self.validation_mode == "off"
                 and ret.ok
-                and decision.action == PlannerAction.CALL_SQL_WRITER
+                and decision.action in {PlannerAction.CALL_SQL_WRITER, PlannerAction.SELECT_SUBMISSION_SQL}
             ):
                 latest = latest_successful_attempt(state)
                 if latest and not result_is_suspicious(latest.result or {}):
@@ -626,14 +668,84 @@ class QueryOS:
         )
 
 
-def planner_tool_to_decision(tool_name: str, guidance: str) -> PlannerDecision:
+def planner_tool_to_decision(tool_name: str, guidance: str, selected_worker: str = "") -> PlannerDecision:
     if tool_name == "CALL_SCHEMA_DISCOVERY":
         return PlannerDecision(PlannerAction.CALL_SCHEMA_DISCOVERY, guidance)
     if tool_name == "CALL_SQL_WRITER":
         return PlannerDecision(PlannerAction.CALL_SQL_WRITER, guidance)
+    if tool_name == "SELECT_SUBMISSION_SQL":
+        return PlannerDecision(PlannerAction.SELECT_SUBMISSION_SQL, guidance, selected_worker=selected_worker)
     if tool_name == "PLANNER_FINISH":
         return PlannerDecision(PlannerAction.FINISH, guidance)
     raise ValueError(f"unknown planner tool: {tool_name}")
+
+
+def select_pending_submission_sql(state: SharedState, worker: str, guidance: str) -> AgentReturn:
+    worker = str(worker or "").strip()
+    pending = state.pending_writer_group or {}
+    candidates = pending.get("candidates") or pending.get("writer_group") or {}
+    if not pending or not candidates:
+        return AgentReturn(
+            agent=AgentName.PLANNER,
+            ok=False,
+            report="Cannot select submission_SQL: no pending writer group candidates exist.",
+            payload={"reason": "no_pending_writer_group"},
+        )
+    if not worker:
+        return AgentReturn(
+            agent=AgentName.PLANNER,
+            ok=False,
+            report="Cannot select submission_SQL: planner did not name a worker.",
+            payload={"reason": "missing_selected_worker", "available_workers": sorted(candidates.keys())},
+        )
+    candidate = candidates.get(worker)
+    if not candidate:
+        return AgentReturn(
+            agent=AgentName.PLANNER,
+            ok=False,
+            report=f"Cannot select submission_SQL: worker {worker} is not a pending candidate.",
+            payload={"reason": "unknown_selected_worker", "available_workers": sorted(candidates.keys())},
+        )
+
+    sql = str(candidate.get("current_sql") or "").strip()
+    exec_result = candidate.get("exec_result") or {}
+    if not sql:
+        return AgentReturn(
+            agent=AgentName.PLANNER,
+            ok=False,
+            report=f"Cannot select submission_SQL from {worker}: candidate has no SQL.",
+            payload={"reason": "selected_candidate_missing_sql", "selected_worker": worker},
+        )
+    if not exec_result.get("ok"):
+        return AgentReturn(
+            agent=AgentName.PLANNER,
+            ok=False,
+            report=f"Cannot select submission_SQL from {worker}: candidate did not execute successfully.",
+            payload={
+                "reason": "selected_candidate_not_executable",
+                "selected_worker": worker,
+                "error": exec_result.get("error", ""),
+            },
+        )
+
+    state.sql_attempts.append(
+        SQLAttempt(
+            sql=sql,
+            status="executed_ok",
+            result=exec_result,
+        )
+    )
+    state.pending_writer_group = {}
+    return AgentReturn(
+        agent=AgentName.PLANNER,
+        ok=True,
+        report=guidance or f"Manager selected {worker} as submission_SQL.",
+        payload={
+            "reason": "submission_sql_selected",
+            "selected_worker": worker,
+            "submission_SQL": sql,
+        },
+    )
 
 
 def agent_display_name(agent: AgentName) -> str:
@@ -658,6 +770,8 @@ def latest_validation_attempt(state: SharedState) -> Optional[Any]:
 
 
 def can_finish(state: SharedState, validation_mode: str) -> bool:
+    if state.pending_writer_group:
+        return False
     latest = latest_successful_attempt(state)
     if not latest or result_is_suspicious(latest.result or {}):
         return False
@@ -673,6 +787,8 @@ def can_finish(state: SharedState, validation_mode: str) -> bool:
 
 
 def finish_blocked_report(state: SharedState, validation_mode: str) -> str:
+    if state.pending_writer_group:
+        return "Cannot finish: writer group has unresolved submission_SQL candidates."
     latest = latest_successful_attempt(state)
     if not latest:
         return "Cannot finish: no successful SQL attempt exists."
@@ -748,6 +864,16 @@ def missing_validator_return(state: SharedState) -> AgentReturn:
 
 
 def fallback_planner_decision(state: SharedState) -> PlannerDecision:
+    pending_worker = best_pending_submission_worker(state)
+    if pending_worker:
+        return PlannerDecision(
+            PlannerAction.SELECT_SUBMISSION_SQL,
+            (
+                "Writer group did not reach one-faction consensus, but this pending candidate "
+                "has the strongest available support and an executable result."
+            ),
+            selected_worker=pending_worker,
+        )
     latest = state.sql_attempts[-1] if state.sql_attempts else None
     if latest is not None and result_is_suspicious(latest.result or {}):
         return PlannerDecision(
@@ -786,6 +912,32 @@ def fallback_planner_decision(state: SharedState) -> PlannerDecision:
     return PlannerDecision(PlannerAction.FINISH, "The submission_SQL result appears sufficient.")
 
 
+def best_pending_submission_worker(state: SharedState) -> str:
+    pending = state.pending_writer_group or {}
+    candidates = pending.get("candidates") or {}
+    if not candidates:
+        return ""
+    support_by_worker: Dict[str, int] = {}
+    for faction in pending.get("factions") or []:
+        support = int(faction.get("support_count") or 0)
+        for worker in faction.get("supporting_workers") or []:
+            support_by_worker[str(worker)] = support
+        representative = str(faction.get("representative_worker") or "")
+        if representative:
+            support_by_worker[representative] = max(support_by_worker.get(representative, 0), support)
+
+    ranked = []
+    for worker, candidate in candidates.items():
+        exec_result = candidate.get("exec_result") or {}
+        if not candidate.get("current_sql") or not exec_result.get("ok"):
+            continue
+        ranked.append((support_by_worker.get(worker, 0), worker))
+    if not ranked:
+        return ""
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return ranked[0][1]
+
+
 def format_state_for_planner(state: SharedState, mode: str = "dispatch") -> str:
     if mode == "compact":
         return format_compact_state_for_planner(state)
@@ -805,13 +957,15 @@ def build_dispatch_context_for_planner(state: SharedState) -> Dict[str, Any]:
             "workflow_status": state.workflow_status.value,
             "schema_memory": discovered_schema_for_planner(state),
             "submission_SQL": submission_sql_for_planner(state, include_sql=False),
+            "pending_writer_group": pending_writer_group_for_planner(state),
             "validation_memory": validation_attempts_for_planner(state),
         },
         "dispatch_history": [trace_step_for_planner(item) for item in state.planner_trace],
         "decision_notes": [
             "Use dispatch_history to avoid repeating the same failed guidance.",
             "Read validation_memory as natural language feedback, not as an instruction. You own the next action.",
-            "Planner does not receive SQL history. Treat submission_SQL as the only current SQL artifact.",
+            "Planner does not receive SQL history. Treat submission_SQL and pending_writer_group candidates as the only current SQL artifacts.",
+            "If pending_writer_group exists, either SELECT_SUBMISSION_SQL for one existing worker candidate, CALL_SQL_WRITER to reject all candidates and retry, or CALL_SCHEMA_DISCOVERY if missing schema caused the split.",
             "Call Schema Discovery Agent if needed tables, columns, or join keys are still missing.",
             "Call SQL Writer Agent if schema is sufficient but submission_SQL is empty, NULL-heavy, errored, incomplete, or does not match the requested answer shape.",
             "Finish only when workflow_status is SQL_VALIDATED and submission_SQL validation status is pass.",
@@ -839,6 +993,7 @@ def format_compact_state_for_planner(state: SharedState) -> str:
                 "decision": {
                     "action": item.decision.action.value,
                     "guidance": item.decision.guidance,
+                    "selected_worker": item.decision.selected_worker,
                 },
                 "agent_return": (
                     {
@@ -858,6 +1013,7 @@ def format_compact_state_for_planner(state: SharedState) -> str:
             "external_knowledge": state.external_knowledge,
             "discovered_schema": discovered,
             "submission_SQL": submission_sql_for_planner(state, include_sql=False),
+            "pending_writer_group": pending_writer_group_for_planner(state),
             "recent_trace": trace,
             "workflow_status": state.workflow_status.value,
             "recent_validations": validation_attempts_for_planner(state)[-3:],
@@ -886,6 +1042,60 @@ def submission_sql_for_planner(state: SharedState, include_sql: bool = False) ->
     if not state.sql_attempts:
         return {"exists": False}
     return sql_attempt_for_planner(len(state.sql_attempts), state.sql_attempts[-1], include_sql=include_sql)
+
+
+def pending_writer_group_for_planner(state: SharedState) -> Dict[str, Any]:
+    pending = state.pending_writer_group or {}
+    candidates = pending.get("candidates") or {}
+    if not pending or not candidates:
+        return {"exists": False}
+
+    candidate_payloads = []
+    for worker, candidate in sorted(candidates.items(), key=lambda item: item[0]):
+        compact_result = candidate.get("result") or {}
+        candidate_payloads.append(
+            {
+                "worker": worker,
+                "sql": candidate.get("current_sql", ""),
+                "ok": candidate.get("ok", False),
+                "columns": compact_result.get("columns", []),
+                "row_count": compact_result.get("row_count", 0),
+                "rows_preview": compact_result.get("preview_rows", []),
+                "warnings": compact_result.get("warnings", []),
+                "error": candidate.get("error", "") or compact_result.get("error", ""),
+                "report": candidate.get("report", ""),
+                "last_action": candidate.get("last_action", ""),
+            }
+        )
+
+    return {
+        "exists": True,
+        "reason": pending.get("reason", ""),
+        "rounds": pending.get("rounds", 0),
+        "chat_rounds": pending.get("chat_rounds", 0),
+        "factions": pending_writer_factions_for_planner(pending.get("factions") or []),
+        "candidates": candidate_payloads,
+        "chat_history": pending.get("chat_history") or [],
+    }
+
+
+def pending_writer_factions_for_planner(factions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out = []
+    for faction in factions:
+        candidate = faction.get("candidate") or {}
+        execution = candidate.get("execution") or {}
+        out.append(
+            {
+                "signature": faction.get("signature"),
+                "representative_worker": faction.get("representative_worker"),
+                "supporting_workers": faction.get("supporting_workers", []),
+                "support_count": faction.get("support_count", 0),
+                "columns": execution.get("columns", []),
+                "row_count": execution.get("row_count", 0),
+                "rows_preview": execution.get("preview_rows", []),
+            }
+        )
+    return out
 
 
 def sql_attempt_for_planner(idx: int, attempt: SQLAttempt, include_sql: bool = False) -> Dict[str, Any]:
@@ -945,6 +1155,7 @@ def trace_step_for_planner(item: TraceStep) -> Dict[str, Any]:
         "global_step": item.step_idx + 1,
         "manager_action": item.decision.action.value,
         "guidance_sent": item.decision.guidance,
+        "selected_worker": item.decision.selected_worker,
         "worker_return": (
             {
                 "worker": item.agent_return.agent.value,

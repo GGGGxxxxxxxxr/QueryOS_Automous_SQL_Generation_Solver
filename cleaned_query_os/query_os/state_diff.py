@@ -23,6 +23,7 @@ def snapshot_state(state: SharedState, sql_preview_rows: int = 3) -> Dict[str, A
             _validation_attempt_snapshot(idx, attempt)
             for idx, attempt in enumerate(state.validation_attempts, start=1)
         ],
+        "pending_writer_group": _pending_writer_group_snapshot(state.pending_writer_group),
         "planner_trace": [_planner_step_snapshot(item) for item in state.planner_trace],
     }
 
@@ -42,6 +43,10 @@ def diff_state(
         "updated_tables": _updated_tables(before, after),
         "added_sql_attempts": _added_sql_attempts(before, after),
         "added_validation_attempts": _added_validation_attempts(before, after),
+        "pending_writer_group": _value_change(
+            before.get("pending_writer_group"),
+            after.get("pending_writer_group"),
+        ),
         "added_planner_steps": _added_planner_steps(before, after),
         "updated_planner_steps": _updated_planner_steps(before, after),
     }
@@ -96,6 +101,14 @@ def summarize_delta_for_planner(delta_payload: Dict[str, Any]) -> Dict[str, Any]
         }
     if delta.get("added_validation_attempts"):
         compact_delta["added_validation_attempts"] = delta.get("added_validation_attempts")
+    if delta.get("pending_writer_group"):
+        after_pending = (delta.get("pending_writer_group") or {}).get("to") or {}
+        compact_delta["pending_writer_group"] = {
+            "exists": bool(after_pending.get("exists")),
+            "candidate_count": after_pending.get("candidate_count", 0),
+            "faction_count": after_pending.get("faction_count", 0),
+            "reason": after_pending.get("reason", ""),
+        }
     if delta.get("updated_planner_steps"):
         compact_delta["worker_returns"] = [
             {
@@ -138,6 +151,9 @@ def summarize_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         }
     if latest_validation:
         summary["latest_validation"] = latest_validation
+    pending = snapshot.get("pending_writer_group") or {}
+    if pending.get("exists"):
+        summary["pending_writer_group"] = pending
     return summary
 
 
@@ -200,6 +216,7 @@ def _planner_step_snapshot(item: Any) -> Dict[str, Any]:
         "step_idx": item.step_idx,
         "action": item.decision.action.value,
         "guidance": item.decision.guidance,
+        "selected_worker": item.decision.selected_worker,
         "agent_return": (
             {
                 "agent": agent_return.agent.value,
@@ -209,6 +226,31 @@ def _planner_step_snapshot(item: Any) -> Dict[str, Any]:
             if agent_return
             else None
         ),
+    }
+
+
+def _pending_writer_group_snapshot(pending: Dict[str, Any]) -> Dict[str, Any]:
+    candidates = pending.get("candidates") or {}
+    factions = pending.get("factions") or []
+    if not pending or not candidates:
+        return {"exists": False}
+    return {
+        "exists": True,
+        "reason": pending.get("reason", ""),
+        "rounds": pending.get("rounds", 0),
+        "chat_rounds": pending.get("chat_rounds", 0),
+        "candidate_count": len(candidates),
+        "faction_count": len(factions),
+        "workers": sorted(candidates.keys()),
+        "factions": [
+            {
+                "representative_worker": item.get("representative_worker"),
+                "supporting_workers": item.get("supporting_workers", []),
+                "support_count": item.get("support_count", 0),
+                "row_count": ((item.get("candidate") or {}).get("execution") or {}).get("row_count", 0),
+            }
+            for item in factions
+        ],
     }
 
 

@@ -172,6 +172,8 @@ class EventTracer:
             ]
             if guidance:
                 lines.append(f"  {self._color('guidance', 'yellow')}: {guidance}")
+            if payload.get("selected_worker"):
+                lines.append(f"  {self._color('selected worker', 'cyan')}: {payload.get('selected_worker')}")
             return "\n".join(lines)
 
         if event_type == "validation_start":
@@ -281,7 +283,10 @@ class EventTracer:
             return "\n".join(lines)
 
         if event_type == "writer_group_divergence":
-            lines = [self._color("  [ERR] SWA writer group did not reach consensus", "red", bold=True)]
+            if payload.get("selectable"):
+                lines = [self._color("  [PENDING] SWA writer group needs manager selection", "yellow", bold=True)]
+            else:
+                lines = [self._color("  [ERR] SWA writer group did not reach consensus", "red", bold=True)]
             if payload.get("rounds") is not None:
                 lines.append(f"    {self._color('rounds', 'yellow')}: {payload.get('rounds')}")
             if payload.get("chat_rounds") is not None:
@@ -730,6 +735,8 @@ class EventTracer:
             return "Schema Discovery Agent"
         if action == "CALL_SQL_WRITER":
             return "SQL Writer Agent"
+        if action == "SELECT_SUBMISSION_SQL":
+            return "Select submission_SQL"
         if action == "FINISH":
             return "Finish"
         return action or "Worker"

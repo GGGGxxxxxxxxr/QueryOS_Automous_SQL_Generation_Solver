@@ -931,6 +931,7 @@ def fork_shared_state_for_schema(state: SharedState) -> SharedState:
         discovered=copy.deepcopy(state.discovered),
         sql_attempts=list(state.sql_attempts),
         validation_attempts=list(state.validation_attempts),
+        pending_writer_group=dict(state.pending_writer_group),
         planner_trace=list(state.planner_trace),
         step=state.step,
         max_steps=state.max_steps,
