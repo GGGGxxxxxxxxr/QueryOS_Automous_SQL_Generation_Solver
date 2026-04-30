@@ -7,6 +7,7 @@ import re
 import sqlite3
 import sys
 import threading
+import time
 from collections import Counter, defaultdict
 from itertools import permutations
 from pathlib import Path
@@ -54,6 +55,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--preview-rows", type=int, default=10)
     parser.add_argument("--max-projection-combinations", type=int, default=20000)
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=1,
+        help="Print per-record progress every N records. 0 disables progress logs.",
+    )
     args = parser.parse_args()
 
     error_bank = Path(args.error_bank).expanduser().resolve()
@@ -84,6 +91,10 @@ def main() -> int:
         resolved_handle = resolved_jsonl.open("w", encoding="utf-8") if resolved_jsonl else None
         try:
             for idx, record in enumerate(records, start=1):
+                qid = record.get("question_id")
+                db_id = record.get("db_id")
+                if should_print_progress(idx, len(records), args.progress_every):
+                    print(f"[recheck] start {idx}/{len(records)} qid={qid} db={db_id}", flush=True)
                 analysis = recheck_record(
                     record=record,
                     dataset_root=dataset_root,
@@ -101,16 +112,20 @@ def main() -> int:
                     counters["true_error"] += 1
                     clusters[cluster] += 1
                     true_handle.write(json.dumps(annotated, ensure_ascii=False, default=str) + "\n")
+                    true_handle.flush()
                 else:
                     counters["relaxed_non_error"] += 1
                     resolved_clusters[cluster] += 1
                     if resolved_handle:
                         resolved_handle.write(json.dumps(annotated, ensure_ascii=False, default=str) + "\n")
+                        resolved_handle.flush()
 
-                if idx % 25 == 0 or idx == len(records):
+                if should_print_progress(idx, len(records), args.progress_every):
                     print(
-                        f"[recheck] {idx}/{len(records)} processed; "
-                        f"true={counters['true_error']} relaxed={counters['relaxed_non_error']}"
+                        f"[recheck] done {idx}/{len(records)} qid={qid} cluster={cluster} "
+                        f"true_error={bool(analysis.get('true_error'))}; "
+                        f"true={counters['true_error']} relaxed={counters['relaxed_non_error']}",
+                        flush=True,
                     )
         finally:
             if resolved_handle:
@@ -225,10 +240,12 @@ def execute_sql(db_path: Path, sql: str, *, max_rows: int, timeout: int) -> Dict
         return {"ok": False, "columns": [], "rows": [], "error": "empty SQL", "truncated": False}
     conn: Optional[sqlite3.Connection] = None
     timer: Optional[threading.Timer] = None
+    deadline = time.monotonic() + max(1, timeout)
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=timeout)
         conn.execute(f"PRAGMA busy_timeout = {timeout * 1000}")
         conn.set_authorizer(read_only_authorizer)
+        conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10000)
         cursor = conn.cursor()
         timer = threading.Timer(timeout, conn.interrupt)
         timer.daemon = True
@@ -247,11 +264,15 @@ def execute_sql(db_path: Path, sql: str, *, max_rows: int, timeout: int) -> Dict
         rows = [list(row) for row in raw_rows]
         return {"ok": True, "columns": columns, "rows": rows, "error": "", "truncated": truncated}
     except Exception as exc:
-        return {"ok": False, "columns": [], "rows": [], "error": str(exc), "truncated": False}
+        error = str(exc)
+        if time.monotonic() > deadline and "interrupted" in error.lower():
+            error = f"SQL execution timeout after {timeout}s"
+        return {"ok": False, "columns": [], "rows": [], "error": error, "truncated": False}
     finally:
         if timer:
             timer.cancel()
         if conn:
+            conn.set_progress_handler(None, 0)
             conn.close()
 
 
@@ -259,6 +280,12 @@ def read_only_authorizer(action: int, arg1: str, arg2: str, dbname: str, source:
     if action in WRITE_ACTIONS:
         return sqlite3.SQLITE_DENY
     return sqlite3.SQLITE_OK
+
+
+def should_print_progress(idx: int, total: int, progress_every: int) -> bool:
+    if progress_every <= 0:
+        return False
+    return idx == 1 or idx == total or idx % progress_every == 0
 
 
 def find_matching_projection(
