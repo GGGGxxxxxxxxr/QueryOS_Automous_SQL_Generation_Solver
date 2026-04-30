@@ -63,7 +63,19 @@ def main() -> int:
     parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to sleep between examples.")
     parser.add_argument("--live-trace", action="store_true", help="Show QueryOS live trace while batch runs.")
     parser.add_argument("--no-resume", action="store_true", help="Do not skip existing output records/results.")
-    parser.add_argument("--overwrite-results", action="store_true", help="Regenerate q*_result.json even if present.")
+    parser.add_argument(
+        "--overwrite-results",
+        dest="overwrite_results",
+        action="store_true",
+        default=True,
+        help="Regenerate q*_result.json even if present. This is the default.",
+    )
+    parser.add_argument(
+        "--no-overwrite-results",
+        dest="overwrite_results",
+        action="store_false",
+        help="Reuse existing q*_result.json files when present.",
+    )
     parser.add_argument("--llm-reason", action="store_true", help="Use an LLM to summarize true-error reasons.")
     parser.add_argument("--no-llm-reason", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-relaxed-recheck", action="store_true", help="Disable full SQL re-execution relaxed matching.")
