@@ -43,7 +43,7 @@ For percentages, numerator and denominator must use the same grain.
 - Customer segment and gas station segment are different.
 - Customer currency and gas station country are different.
 - Country/location questions usually need the gas station path.
-- For transaction-linked nationality/country wording, prefer gas station country when customer country is absent.
+- In this DB, customer nationality/country is treated as the country of the gas station where the customer made the relevant transaction.
 - Product-description questions need the product path.
 - Transaction-date/price/amount questions should start from transactions and join outward.
 
