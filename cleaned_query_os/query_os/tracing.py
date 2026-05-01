@@ -152,11 +152,12 @@ class EventTracer:
             db_path = self._shorten(str(payload.get("db_path", "")), 120)
             return "\n".join(
                 [
-                    self._color("+------------------------------------------------------------", "cyan"),
-                    self._color("| QueryOS Agent Run", "cyan", bold=True),
-                    f"| {self._color('question', 'yellow', bold=True)}: {question}",
-                    f"| {self._color('database', 'yellow', bold=True)}: {db_path}",
-                    self._color("+------------------------------------------------------------", "cyan"),
+                    "",
+                    self._separator("cyan", char="="),
+                    self._color("QUERYOS RUN", "cyan", bold=True),
+                    f"  {self._color('question', 'yellow', bold=True)}  {question}",
+                    f"  {self._color('database', 'yellow', bold=True)}  {db_path}",
+                    self._separator("cyan", char="="),
                 ]
             )
 
@@ -421,13 +422,45 @@ class EventTracer:
                     lines.append(f"  error: {error}")
             return "\n".join(lines)
 
+        if event_type == "final_summary":
+            mark = "[OK]" if status in {None, "ok"} else "[ERR]"
+            color = "green" if status in {None, "ok"} else "red"
+            lines = [
+                "",
+                self._separator(color, char="="),
+                self._color(f"{mark} FINAL SUBMISSION", color, bold=True),
+            ]
+            if payload.get("workflow_status"):
+                lines.append(f"  {self._color('workflow', 'cyan')}: {payload.get('workflow_status')}")
+            if payload.get("validation_status"):
+                validation = str(payload.get("validation_status"))
+                validation_color = "green" if validation == "pass" else "yellow"
+                lines.append(f"  {self._color('validation', validation_color)}: {validation}")
+            if payload.get("rows") is not None:
+                lines.append(f"  {self._color('rows', 'green')}: {payload.get('rows')}")
+            columns = payload.get("columns") or []
+            if columns:
+                lines.append(f"  {self._color('columns', 'cyan')}: {', '.join(str(col) for col in columns)}")
+            if payload.get("sql"):
+                lines.append(f"  {self._color('submission_SQL', 'yellow', bold=True)}")
+                for sql_line in self._format_sql_block(str(payload.get("sql") or "")):
+                    lines.append(f"    {self._color(sql_line, 'yellow')}")
+            preview_rows = payload.get("preview_rows") or []
+            if preview_rows:
+                lines.append(f"  {self._color('preview', 'green', bold=True)}")
+                lines.extend(self._format_result_table(columns, preview_rows, indent="    "))
+            if payload.get("report"):
+                lines.append(f"  {self._color('report', 'green')}: {payload.get('report')}")
+            lines.append(self._separator(color, char="="))
+            return "\n".join(lines)
+
         if event_type == "gold_start":
             sql = self._shorten(str(payload.get("sql") or ""), 240)
             return "\n".join(
                 [
                     "",
                     self._separator("cyan"),
-                    self._color("GOLDEN SQL CHECK", "cyan", bold=True),
+                    self._color("REFERENCE SQL CHECK", "cyan", bold=True),
                     f"  {self._color('sql', 'yellow', bold=True)}: {self._color(sql, 'yellow')}",
                 ]
             )
@@ -435,9 +468,9 @@ class EventTracer:
         if event_type == "gold_result":
             mark = "[MATCH]" if payload.get("gold_match") else "[MISMATCH]"
             if status != "ok":
-                mark = "[GOLD ERROR]"
+                mark = "[REFERENCE ERROR]"
             color = "green" if payload.get("gold_match") and status == "ok" else "red"
-            lines = [self._color(f"{mark} Golden SQL result", color, bold=True)]
+            lines = [self._color(f"{mark} Reference SQL result", color, bold=True)]
             lines.extend(self._pretty_payload_lines(payload, indent="  "))
             return "\n".join(lines)
 
@@ -494,7 +527,10 @@ class EventTracer:
         if payload.get("guidance"):
             lines.append(f"{indent}{self._color('guidance', 'yellow')}: {payload.get('guidance')}")
         if payload.get("gold_match") is not None:
-            lines.append(f"{indent}{self._color('gold match', 'green' if payload.get('gold_match') else 'red')}: {payload.get('gold_match')}")
+            lines.append(
+                f"{indent}{self._color('reference match', 'green' if payload.get('gold_match') else 'red')}: "
+                f"{payload.get('gold_match')}"
+            )
         if payload.get("comparison_mode"):
             lines.append(f"{indent}comparison mode: {payload.get('comparison_mode')}")
         if payload.get("exact_match") is not None:
@@ -510,7 +546,7 @@ class EventTracer:
         if payload.get("predicted_preview"):
             lines.append(f"{indent}{self._color('predicted preview', 'cyan')}: {self._shorten(str(payload.get('predicted_preview')), 220)}")
         if payload.get("gold_preview"):
-            lines.append(f"{indent}{self._color('gold preview', 'cyan')}: {self._shorten(str(payload.get('gold_preview')), 220)}")
+            lines.append(f"{indent}{self._color('reference preview', 'cyan')}: {self._shorten(str(payload.get('gold_preview')), 220)}")
         if payload.get("error"):
             lines.append(f"{indent}{self._color('error', 'red', bold=True)}: {payload.get('error')}")
         if payload.get("report"):
@@ -844,8 +880,8 @@ class EventTracer:
                 fields.append(f"{key}={self._shorten(str(payload[key]), 120)}")
         return ", ".join(fields)
 
-    def _separator(self, color: str = "cyan") -> str:
-        return self._color("-" * 72, color)
+    def _separator(self, color: str = "cyan", char: str = "-") -> str:
+        return self._color(char * 72, color)
 
     def _repeats_planner_guidance(self, global_step: Optional[int], guidance: str) -> bool:
         if global_step is None or not guidance:

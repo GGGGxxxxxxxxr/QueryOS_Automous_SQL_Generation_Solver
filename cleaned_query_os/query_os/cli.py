@@ -26,8 +26,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--external-knowledge", default="", help="Optional extra task context.")
     parser.add_argument("--db-id", default="", help="Optional database id/name.")
     parser.add_argument("--max-steps", type=int, help="Manager step budget.")
-    parser.add_argument("--gold-sql", default="", help="Optional golden SQL to execute after QueryOS finishes.")
-    parser.add_argument("--gold-sql-file", help="Optional file containing golden SQL to execute after QueryOS finishes.")
+    parser.add_argument("--gold-sql", default="", help="Optional reference SQL to execute after QueryOS finishes.")
+    parser.add_argument("--gold-sql-file", help="Optional file containing reference SQL to execute after QueryOS finishes.")
     parser.add_argument(
         "--no-live-trace",
         action="store_true",

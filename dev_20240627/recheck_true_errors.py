@@ -625,9 +625,9 @@ def distinct_counterfactual(
                 )
                 if comparison.get("match"):
                     return {
-                        "true_error": True,
-                        "cluster": "unnecessary_distinct_in_predicted_sql",
-                        "reason": "Removing DISTINCT from predicted SQL makes the result match the reference.",
+                        "true_error": False,
+                        "cluster": "unnecessary_distinct_relaxed_pass",
+                        "reason": "Removing DISTINCT from predicted SQL makes the result match; treated as a relaxed pass.",
                         "distinct_counterfactual": {
                             "side": "predicted",
                             "variant_sql": variant_sql,

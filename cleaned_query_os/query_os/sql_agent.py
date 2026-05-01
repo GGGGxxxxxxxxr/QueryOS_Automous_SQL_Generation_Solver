@@ -381,11 +381,33 @@ class AgenticSystem:
         result = final_attempt.result if final_attempt and final_attempt.result else {}
         sql_result = result.get("result") or {}
         final_sql = final_attempt.sql if final_attempt else ""
+        final_rows = sql_result.get("rows", [])
+        final_columns = sql_result.get("columns", [])
+        latest_validation = state.validation_attempts[-1] if state.validation_attempts else None
+        self.tracer.emit(
+            "final_summary",
+            "manager",
+            "Final submission summary.",
+            status="ok" if final_sql else "error",
+            payload={
+                "workflow_status": state.workflow_status.value
+                if hasattr(state.workflow_status, "value")
+                else str(state.workflow_status),
+                "validation_status": latest_validation.status if latest_validation else "",
+                "rows": len(final_rows),
+                "columns": final_columns,
+                "preview_rows": final_rows[: self.state_sql_preview_rows]
+                if self.state_sql_preview_rows > 0
+                else final_rows,
+                "sql": final_sql,
+                "report": final_report,
+            },
+        )
         return SQLGenerationResult(
             question=state.question,
             final_sql=final_sql,
-            rows=sql_result.get("rows", []),
-            columns=sql_result.get("columns", []),
+            rows=final_rows,
+            columns=final_columns,
             ok=bool(final_sql),
             report=final_report,
             sql_attempts=state.sql_attempts,
