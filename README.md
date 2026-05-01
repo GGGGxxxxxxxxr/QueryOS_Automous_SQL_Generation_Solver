@@ -12,26 +12,21 @@ The archived raw implementation is preserved in
 
 ## Design Goals
 
-QueryOS is built around a few core ideas:
+QueryOS is built around a manager that schedules work instead of pretending one
+prompt can solve the whole problem. The manager decides when to inspect schema,
+when to ask writers for SQL, when validation is useful, and when the current
+`submission_SQL` is ready to return.
 
-- **Manager as state controller**: the planner does not just write SQL. It decides
-  which worker should run next, reads shared state, and owns the final finish
-  decision.
-- **Workers as OS-like threads**: schema discovery and SQL writing can fork
-  parallel workers. Each worker works independently, then QueryOS merges the
-  useful result back into global state.
-- **Shared global memory**: discovered schema, SQL attempts, validation feedback,
-  planner decisions, warnings, and workflow status are visible in the trace and
-  saved to JSON.
-- **Validator as a gate, not a dictator**: the SQL Validator Agent gives natural
-  language feedback. The planner still decides whether to retry, ask another
-  worker, or finish.
-- **Observable execution**: the CLI prints a readable live workflow trace, SQL
-  previews, shared-state updates, validation results, and optional reference SQL
-  comparisons.
-- **Local-model friendly**: QueryOS supports hosted OpenAI models and separate
-  OpenAI-compatible vLLM backends, including routing across multiple local model
-  copies.
+Workers behave more like OS threads than chained prompt stages. Schema discovery
+and SQL writing can fork multiple workers over the same shared state, compare
+their results, and merge only the useful parts back. The shared state is not
+hidden: schema evidence, SQL attempts, validation feedback, planner decisions,
+warnings, and workflow status are visible in the live trace and saved to JSON.
+
+Validation is a gate, not a ruler. It can block weak answers and leave feedback,
+but the manager still owns the next decision. The system is also built for local
+model work: OpenAI-compatible vLLM endpoints can be routed as separate model
+copies, which makes the parallel worker design practical on local infrastructure.
 
 ## Workflow
 
